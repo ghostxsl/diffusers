@@ -334,6 +334,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         device: Union[str, torch.device] = None,
         mu: Optional[float] = None,
         timesteps: Optional[List[int]] = None,
+        **kwargs
     ):
         """
         Sets the discrete timesteps used for the diffusion chain (to be run before inference).
@@ -428,6 +429,14 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             sigmas = 1.0 - alphas
             sigmas = np.flip(self.config.flow_shift * sigmas / (1 + (self.config.flow_shift - 1) * sigmas))[:-1].copy()
             timesteps = (sigmas * self.config.num_train_timesteps).copy()
+        elif self.config.use_dynamic_shifting:
+            sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+            if kwargs.get("use_karras_sigmas", False):
+                sigmas = self._convert_to_karras(in_sigmas=sigmas, num_inference_steps=num_inference_steps)
+            else:
+                mu = kwargs.get("mu", None)
+                sigmas = math.exp(mu) / (math.exp(mu) + (1 / sigmas - 1) ** 1.0)
+            timesteps = sigmas * self.config.num_train_timesteps
         else:
             sigmas = np.interp(timesteps, np.arange(0, len(sigmas)), sigmas)
 
@@ -443,7 +452,10 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         sigmas = np.concatenate([sigmas, [sigma_last]]).astype(np.float32)
 
         self.sigmas = torch.from_numpy(sigmas)
-        self.timesteps = torch.from_numpy(timesteps).to(device=device, dtype=torch.int64)
+        if self.config.use_dynamic_shifting:
+            self.timesteps = torch.from_numpy(timesteps).to(device=device)
+        else:
+            self.timesteps = torch.from_numpy(timesteps).to(device=device, dtype=torch.int64)
 
         self.num_inference_steps = len(timesteps)
 
@@ -516,7 +528,7 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         return t
 
     def _sigma_to_alpha_sigma_t(self, sigma):
-        if self.config.use_flow_sigmas:
+        if self.config.use_flow_sigmas or self.config.use_dynamic_shifting:
             alpha_t = 1 - sigma
             sigma_t = sigma
         else:
@@ -1175,6 +1187,54 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma)
         noisy_samples = alpha_t * original_samples + sigma_t * noise
         return noisy_samples
+
+    def scale_noise(
+        self,
+        sample: torch.FloatTensor,
+        timestep: Union[float, torch.FloatTensor],
+        noise: Optional[torch.FloatTensor] = None,
+    ) -> torch.FloatTensor:
+        """
+        Forward process in flow-matching
+
+        Args:
+            sample (`torch.FloatTensor`):
+                The input sample.
+            timestep (`int`, *optional*):
+                The current timestep in the diffusion chain.
+
+        Returns:
+            `torch.FloatTensor`:
+                A scaled input sample.
+        """
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        sigmas = self.sigmas.to(device=sample.device, dtype=sample.dtype)
+
+        if sample.device.type == "mps" and torch.is_floating_point(timestep):
+            # mps does not support float64
+            schedule_timesteps = self.timesteps.to(sample.device, dtype=torch.float32)
+            timestep = timestep.to(sample.device, dtype=torch.float32)
+        else:
+            schedule_timesteps = self.timesteps.to(sample.device)
+            timestep = timestep.to(sample.device)
+
+        # self.begin_index is None when scheduler is used for training, or pipeline does not implement set_begin_index
+        if self.begin_index is None:
+            step_indices = [self.index_for_timestep(t, schedule_timesteps) for t in timestep]
+        elif self.step_index is not None:
+            # add_noise is called after first denoising step (for inpainting)
+            step_indices = [self.step_index] * timestep.shape[0]
+        else:
+            # add noise is called before first denoising step to create initial latent(img2img)
+            step_indices = [self.begin_index] * timestep.shape[0]
+
+        sigma = sigmas[step_indices].flatten()
+        while len(sigma.shape) < len(sample.shape):
+            sigma = sigma.unsqueeze(-1)
+
+        sample = sigma * noise + (1.0 - sigma) * sample
+
+        return sample
 
     def __len__(self):
         return self.config.num_train_timesteps

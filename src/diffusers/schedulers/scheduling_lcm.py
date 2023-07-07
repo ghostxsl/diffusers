@@ -651,3 +651,81 @@ class LCMScheduler(SchedulerMixin, ConfigMixin):
         else:
             prev_t = timestep - 1
         return prev_t
+
+    def get_pred_original_sample(self,
+                                 model_output: torch.FloatTensor,
+                                 timestep: Union[float, torch.FloatTensor],
+                                 sample: torch.FloatTensor):
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        # 2. compute alphas, betas
+        alpha_prod_t = self.alphas_cumprod[timestep]
+
+        beta_prod_t = 1 - alpha_prod_t
+
+        # 4. Compute the predicted original sample x_0 based on the model parameterization
+        if self.config.prediction_type == "epsilon":  # noise-prediction
+            pred_original_sample = (sample - beta_prod_t.sqrt() * model_output) / alpha_prod_t.sqrt()
+        elif self.config.prediction_type == "sample":  # x-prediction
+            pred_original_sample = model_output
+        elif self.config.prediction_type == "v_prediction":  # v-prediction
+            pred_original_sample = alpha_prod_t.sqrt() * sample - beta_prod_t.sqrt() * model_output
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample` or"
+                " `v_prediction` for `LCMScheduler`."
+            )
+
+        # 5. Clip or threshold "predicted x_0"
+        if self.config.thresholding:
+            pred_original_sample = self._threshold_sample(pred_original_sample)
+        elif self.config.clip_sample:
+            pred_original_sample = pred_original_sample.clamp(
+                -self.config.clip_sample_range, self.config.clip_sample_range
+            )
+
+        return pred_original_sample
+
+    def webui_step(self,
+                   pred_original_sample: torch.FloatTensor,
+                   timestep: Union[float, torch.FloatTensor],
+                   sample: torch.FloatTensor,
+                   generator: Optional[torch.Generator] = None):
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        # 1. get previous step value
+        prev_step_index = self.step_index + 1
+        if prev_step_index < len(self.timesteps):
+            prev_timestep = self.timesteps[prev_step_index]
+        else:
+            prev_timestep = timestep
+
+        # 2. compute alphas, betas
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+        # 3. Get scalings for boundary conditions
+        c_skip, c_out = self.get_scalings_for_boundary_condition_discrete(timestep)
+
+        # 6. Denoise model output using boundary conditions
+        denoised = c_out * pred_original_sample + c_skip * sample
+
+        # 7. Sample and inject noise z ~ N(0, I) for MultiStep Inference
+        # Noise is not used on the final timestep of the timestep schedule.
+        # This also means that noise is not used for one-step sampling.
+        if self.step_index != self.num_inference_steps - 1:
+            noise = randn_tensor(
+                pred_original_sample.shape, generator=generator,
+                device=pred_original_sample.device, dtype=denoised.dtype
+            )
+            prev_sample = alpha_prod_t_prev.sqrt() * denoised + beta_prod_t_prev.sqrt() * noise
+        else:
+            prev_sample = denoised
+
+        # upon completion increase step index by one
+        self._step_index += 1
+
+        return prev_sample
