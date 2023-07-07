@@ -22,6 +22,7 @@ import torch
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput, is_scipy_available, logging
 from .scheduling_utils import SchedulerMixin
+from ..utils.torch_utils import randn_tensor
 
 
 if is_scipy_available():
@@ -98,6 +99,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         use_karras_sigmas: Optional[bool] = False,
         use_exponential_sigmas: Optional[bool] = False,
         use_beta_sigmas: Optional[bool] = False,
+        use_sde: Optional[bool] = False,
     ):
         if self.config.use_beta_sigmas and not is_scipy_available():
             raise ImportError("Make sure to install scipy if you want to use beta sigmas.")
@@ -381,6 +383,16 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sigma_next = self.sigmas[self.step_index + 1]
 
         prev_sample = sample + (sigma_next - sigma) * model_output
+
+        if self.config.use_sde:
+            noise = randn_tensor(
+                model_output.shape,
+                dtype=model_output.dtype,
+                device=model_output.device,
+                generator=generator
+            )
+            sigma_up = (sigma_next * sigma - sigma_next ** 2) ** 0.5
+            prev_sample = prev_sample + noise * sigma_up * s_noise
 
         # Cast sample back to model compatible dtype
         prev_sample = prev_sample.to(model_output.dtype)

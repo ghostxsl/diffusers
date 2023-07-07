@@ -1,0 +1,13 @@
+accelerate
+transformers
+einops
+av
+pillow
+safetensors
+tqdm
+pandas
+opencv-python
+matplotlib
+peft
+boto3==1.35.38
+sentencepiece

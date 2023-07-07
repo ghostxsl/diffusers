@@ -123,6 +123,8 @@ from .state_dict_utils import (
     convert_state_dict_to_peft,
     convert_unet_state_dict_to_peft,
 )
+from .vip_utils import create_random_tensors
+from .prompt_parser import get_promt_embedding
 
 
 logger = get_logger(__name__)
