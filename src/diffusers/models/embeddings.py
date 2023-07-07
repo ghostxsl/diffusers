@@ -21,6 +21,7 @@ from torch import nn
 from ..utils import deprecate
 from .activations import FP32SiLU, get_activation
 from .attention_processor import Attention
+from diffusers.utils.import_utils import is_torch_npu_available
 
 
 def get_timestep_embedding(
