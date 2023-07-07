@@ -22,6 +22,7 @@ from torch import nn
 from ..utils import deprecate
 from .activations import FP32SiLU, get_activation
 from .attention_processor import Attention
+from diffusers.utils.import_utils import is_torch_npu_available
 
 
 def get_timestep_embedding(
@@ -856,6 +857,7 @@ class FluxPosEmbed(nn.Module):
         sin_out = []
         pos = ids.float()
         is_mps = ids.device.type == "mps"
+        is_mps = is_mps or is_torch_npu_available()
         freqs_dtype = torch.float32 if is_mps else torch.float64
         for i in range(n_axes):
             cos, sin = get_1d_rotary_pos_embed(
