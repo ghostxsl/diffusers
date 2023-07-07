@@ -480,3 +480,58 @@ class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def __len__(self):
         return self.config.num_train_timesteps
+
+    def get_pred_original_sample(self,
+                                 model_output: torch.FloatTensor,
+                                 timestep: Union[float, torch.FloatTensor],
+                                 sample: torch.FloatTensor):
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        sigma = self.sigmas[self.step_index]
+
+        # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
+        if self.config.prediction_type == "epsilon":
+            pred_original_sample = sample - sigma * model_output
+        elif self.config.prediction_type == "v_prediction":
+            # v * c_out + input * c_skip
+            pred_original_sample = model_output * (-sigma / (sigma**2 + 1) ** 0.5) + (sample / (sigma**2 + 1))
+        elif self.config.prediction_type == "sample":
+            raise NotImplementedError("prediction_type not implemented yet: sample")
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, or `v_prediction`"
+            )
+        return pred_original_sample
+
+    def webui_step(self,
+                   pred_original_sample: torch.FloatTensor,
+                   timestep: Union[float, torch.FloatTensor],
+                   sample: torch.FloatTensor,
+                   generator: Optional[torch.Generator] = None):
+        if self.step_index is None:
+            self._init_step_index(timestep)
+
+        sigma = self.sigmas[self.step_index]
+
+        sigma_from = self.sigmas[self.step_index]
+        sigma_to = self.sigmas[self.step_index + 1]
+        sigma_up = (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5
+        sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
+
+        # 2. Convert to an ODE derivative
+        derivative = (sample - pred_original_sample) / sigma
+
+        dt = sigma_down - sigma
+
+        prev_sample = sample + derivative * dt
+
+        device = pred_original_sample.device
+        noise = randn_tensor(pred_original_sample.shape, dtype=pred_original_sample.dtype, device=device, generator=generator)
+
+        prev_sample = prev_sample + noise * sigma_up
+
+        # upon completion increase step index by one
+        self._step_index += 1
+
+        return prev_sample
