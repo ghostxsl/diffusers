@@ -22,6 +22,7 @@ import torch
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput, is_scipy_available, logging
 from .scheduling_utils import SchedulerMixin
+from ..utils.torch_utils import randn_tensor
 
 
 if is_scipy_available():
@@ -101,6 +102,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         use_exponential_sigmas: Optional[bool] = False,
         use_beta_sigmas: Optional[bool] = False,
         time_shift_type: str = "exponential",
+        use_sde: Optional[bool] = False,
     ):
         if self.config.use_beta_sigmas and not is_scipy_available():
             raise ImportError("Make sure to install scipy if you want to use beta sigmas.")
@@ -379,6 +381,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         generator: Optional[torch.Generator] = None,
         per_token_timesteps: Optional[torch.Tensor] = None,
         return_dict: bool = True,
+        **kwargs,
     ) -> Union[FlowMatchEulerDiscreteSchedulerOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
@@ -443,6 +446,13 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             sigma_next = self.sigmas[self.step_index + 1]
             dt = sigma_next - sigma
 
+        if kwargs.get("latent_guidance", False):
+            from diffusers.utils.vip_utils import slerp
+            velocity = kwargs["velocity"]
+            v_scale = kwargs["v_scale"]
+            new_velocity = slerp(model_output, velocity, v_scale)
+            model_output = new_velocity.to(model_output.dtype)
+
         prev_sample = sample + dt * model_output
 
         # upon completion increase step index by one
@@ -452,6 +462,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             prev_sample = prev_sample.to(model_output.dtype)
 
         if not return_dict:
+
+            if kwargs.get("return_x0", False):
+                pred_x0 = sample - sigma * model_output
+                return (prev_sample, pred_x0)
+
             return (prev_sample,)
 
         return FlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample)

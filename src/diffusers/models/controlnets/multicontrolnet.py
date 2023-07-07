@@ -44,7 +44,10 @@ class MultiControlNetModel(ModelMixin):
         guess_mode: bool = False,
         return_dict: bool = True,
     ) -> Union[ControlNetOutput, Tuple]:
+        down_block_res_samples, mid_block_res_sample = None, None
         for i, (image, scale, controlnet) in enumerate(zip(controlnet_cond, conditioning_scale, self.nets)):
+            if image is None:
+                continue
             down_samples, mid_sample = controlnet(
                 sample=sample,
                 timestep=timestep,
@@ -61,7 +64,7 @@ class MultiControlNetModel(ModelMixin):
             )
 
             # merge samples
-            if i == 0:
+            if down_block_res_samples is None:
                 down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
             else:
                 down_block_res_samples = [
