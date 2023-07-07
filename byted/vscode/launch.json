@@ -1,0 +1,25 @@
+{
+    // Use Intelligence to find out which attributes exist for node debugging.
+    // Use hover for the description of the existing attributes.
+    // For further information visit https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug Remote Worker",
+            "type": "debugpy",
+            "request": "attach",
+            "listen": {
+                "host": "0.0.0.0",
+                "port": 5678
+            },
+            "logToFile": true,
+            "preLaunchTask": "Launch_Worker",
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "."
+                }
+            ]
+        }
+    ]
+}

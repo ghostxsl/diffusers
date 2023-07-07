@@ -654,6 +654,14 @@ class ControlNetModel(ModelMixin, AttentionMixin, ConfigMixin, FromOriginalModel
                 If `return_dict` is `True`, a [`~models.controlnets.controlnet.ControlNetOutput`] is returned,
                 otherwise a tuple is returned where the first element is the sample tensor.
         """
+        if controlnet_cond is None:
+            if not return_dict:
+                return (None, None)
+
+            return ControlNetOutput(
+                down_block_res_samples=None, mid_block_res_sample=None
+            )
+
         # check channel order
         channel_order = self.config.controlnet_conditioning_channel_order
 

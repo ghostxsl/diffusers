@@ -434,6 +434,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         generator: torch.Generator | None = None,
         per_token_timesteps: torch.Tensor | None = None,
         return_dict: bool = True,
+        **kwargs,
     ) -> FlowMatchEulerDiscreteSchedulerOutput | tuple:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
@@ -512,6 +513,15 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         else:
             prev_sample = sample + dt * model_output
 
+        if kwargs.get("latent_guidance", False):
+            from diffusers.utils.vip_utils import slerp
+            velocity = kwargs["velocity"]
+            v_scale = kwargs["v_scale"]
+            new_velocity = slerp(model_output, velocity, v_scale)
+            model_output = new_velocity.to(model_output.dtype)
+
+            prev_sample = sample + dt * model_output
+
         # upon completion increase step index by one
         self._step_index += 1
         if per_token_timesteps is None:
@@ -519,6 +529,11 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
             prev_sample = prev_sample.to(model_output.dtype)
 
         if not return_dict:
+
+            if kwargs.get("return_x0", False):
+                pred_x0 = sample - sigma * model_output
+                return (prev_sample, pred_x0)
+
             return (prev_sample,)
 
         return FlowMatchEulerDiscreteSchedulerOutput(prev_sample=prev_sample)
