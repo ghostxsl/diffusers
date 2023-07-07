@@ -1,0 +1,17 @@
+accelerate
+transformers
+einops
+av
+pillow
+safetensors
+tqdm
+pandas
+openpyxl
+opencv-python
+matplotlib
+peft
+boto3==1.35.38
+sentencepiece
+scikit-image
+decord
+imageio-ffmpeg
