@@ -941,3 +941,74 @@ class UNet2DConditionLoadersMixin:
                         }
                     )
         return lora_dicts
+
+    def _init_ip_adapter_plus(self,
+                              num_image_text_embeds=16,
+                              embed_dims=1280,
+                              num_class_embeds=None,
+                              state_dict=None):
+        # Kolors Unet already has a `encoder_hid_proj`
+        if (
+            self.encoder_hid_proj is not None
+            and self.config.encoder_hid_dim_type == "text_proj"
+            and not hasattr(self, "text_encoder_hid_proj")
+        ):
+            self.text_encoder_hid_proj = self.encoder_hid_proj
+
+        from ..models.attention_processor import (
+            AttnProcessor,
+            AttnProcessor2_0,
+            IPAdapterAttnProcessor,
+            IPAdapterAttnProcessor2_0,
+        )
+
+        # set ip-adapter cross-attention processors & load state_dict
+        attn_procs = {}
+        for name in self.attn_processors.keys():
+            cross_attention_dim = None if name.endswith("attn1.processor") else self.config.cross_attention_dim
+            if name.startswith("mid_block"):
+                hidden_size = self.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(self.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = self.config.block_out_channels[block_id]
+
+            if cross_attention_dim is None or "motion_modules" in name:
+                attn_processor_class = (
+                    AttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else AttnProcessor
+                )
+                attn_procs[name] = attn_processor_class()
+            else:
+                attn_processor_class = (
+                    IPAdapterAttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else IPAdapterAttnProcessor
+                )
+                attn_procs[name] = attn_processor_class(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=cross_attention_dim,
+                    scale=1.0,
+                    num_tokens=num_image_text_embeds,
+                ).to(dtype=self.dtype, device=self.device)
+
+        self.set_attn_processor(attn_procs)
+
+        # IP-Adapter Image Projection layers
+        image_projection = IPAdapterPlusImageProjection(
+            embed_dims=embed_dims,
+            output_dims=self.config.cross_attention_dim,
+            hidden_dims=self.config.cross_attention_dim,
+            heads=12,
+            num_queries=num_image_text_embeds,
+        )
+
+        self.encoder_hid_proj = MultiIPAdapterImageProjection(
+            [image_projection.to(device=self.device, dtype=self.dtype)])
+        self.config.encoder_hid_dim_type = "ip_image_proj"
+        self.config['encoder_hid_dim_type'] = "ip_image_proj"
+
+        if num_class_embeds is not None:
+            self.class_embedding = torch.nn.Embedding(num_class_embeds, 1280, padding_idx=0)
+
+        if state_dict is not None:
+            self.load_state_dict(state_dict, strict=False)
