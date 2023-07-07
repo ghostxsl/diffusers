@@ -125,6 +125,8 @@ from .state_dict_utils import (
     convert_unet_state_dict_to_peft,
 )
 from .typing_utils import _get_detailed_type, _is_valid_type
+from .vip_utils import create_random_tensors
+from .prompt_parser import get_promt_embedding
 
 
 logger = get_logger(__name__)
