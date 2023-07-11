@@ -35,6 +35,7 @@ def load_webui_textual_inversion(embeddings_dir, pipeline):
             ids_lookup[first_id] = [(ids, embeddings_ind)]
         else:
             ids_lookup[first_id].append((ids, embeddings_ind))
+        print(f'load textual inversion: {file_name}|{len(embeddings_ind)}')
 
     return ids_lookup
 

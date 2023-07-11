@@ -1,0 +1,187 @@
+import random
+from PIL import Image, ImageOps, ImageDraw
+import numpy as np
+import cv2
+
+
+
+def get_fixed_seed(seed):
+    if seed is None or seed == '' or seed == -1:
+        return int(random.randrange(4294967294))
+
+    return seed
+
+
+def load_image(image_path):
+    assert isinstance(image_path, str)
+    image = Image.open(image_path)
+    image = ImageOps.exif_transpose(image)
+    if image.mode == "RGBA":
+        # returning an RGB mode image with no transparency
+        img = np.array(image)[..., :3]
+        image = Image.fromarray(img)
+    return image.convert("RGB")
+
+
+def mask_process(mask, inpainting_mask_invert=True, blur=4):
+    mask = mask.convert("L")
+    if inpainting_mask_invert:
+        mask = ImageOps.invert(mask)
+    if blur > 0:
+        np_mask = np.array(mask)
+        kernel_size = 2 * int(4 * blur + 0.5) + 1
+        np_mask = cv2.GaussianBlur(np_mask, (kernel_size, 1), blur)
+        np_mask = cv2.GaussianBlur(np_mask, (1, kernel_size), blur)
+        mask = Image.fromarray(np_mask)
+    return mask
+
+
+def mediapipe_face_detection(image, model_type=1, confidence=0.3,
+                             dilate=4, erode=0):
+    """
+    model_selection: 0 or 1. 0 to select a short-range model that works
+        best for faces within 2 meters from the camera, and 1 for a full-range
+        model best for faces within 5 meters. See details in
+        https://solutions.mediapipe.dev/face_detection#model_selection.
+    """
+    import mediapipe as mp
+
+    img_width, img_height = image.size
+
+    mp_face_detection = mp.solutions.face_detection
+    draw_util = mp.solutions.drawing_utils
+
+    img_array = np.array(image)
+
+    with mp_face_detection.FaceDetection(
+        model_selection=model_type, min_detection_confidence=confidence
+    ) as face_detector:
+        pred = face_detector.process(img_array)
+
+    if pred.detections is None:
+        return []
+
+    preview_array = img_array.copy()
+
+    bboxes = []
+    for detection in pred.detections:
+        draw_util.draw_detection(preview_array, detection)
+
+        bbox = detection.location_data.relative_bounding_box
+        x1 = bbox.xmin * img_width
+        y1 = bbox.ymin * img_height
+        w = bbox.width * img_width
+        h = bbox.height * img_height
+        x2 = x1 + w
+        y2 = y1 + h
+
+        bboxes.append([x1, y1, x2, y2])
+
+    def create_mask_from_bbox(bboxes, shape):
+        masks = []
+        for bbox in bboxes:
+            mask = Image.new("L", shape, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.rectangle(bbox, fill=255)
+            masks.append(mask)
+        return masks
+
+    masks = create_mask_from_bbox(bboxes, image.size)
+    preview = Image.fromarray(preview_array)
+
+    def _dilate(img, value):
+        img = np.array(img)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (value, value))
+        return Image.fromarray(cv2.dilate(img, kernel, iterations=1))
+
+    def _erode(img, value):
+        img = np.array(img)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (value, value))
+        return Image.fromarray(cv2.erode(img, kernel, iterations=1))
+
+    if dilate > 0:
+        masks = [_dilate(a, dilate) for a in masks]
+
+    if erode > 0:
+        masks = [_erode(a, erode) for a in masks]
+
+    return [bboxes, masks, preview]
+
+
+def get_crop_region(mask, pad=0):
+    """finds a rectangular region that contains all masked ares in an image. Returns (x1, y1, x2, y2) coordinates of the rectangle.
+    For example, if a user has painted the top-right part of a 512x512 image", the result may be (256, 0, 512, 256)"""
+
+    h, w = mask.shape
+
+    crop_left = 0
+    for i in range(w):
+        if not (mask[:, i] == 0).all():
+            break
+        crop_left += 1
+
+    crop_right = 0
+    for i in reversed(range(w)):
+        if not (mask[:, i] == 0).all():
+            break
+        crop_right += 1
+
+    crop_top = 0
+    for i in range(h):
+        if not (mask[i] == 0).all():
+            break
+        crop_top += 1
+
+    crop_bottom = 0
+    for i in reversed(range(h)):
+        if not (mask[i] == 0).all():
+            break
+        crop_bottom += 1
+
+    return (
+        int(max(crop_left-pad, 0)),
+        int(max(crop_top-pad, 0)),
+        int(min(w - crop_right + pad, w)),
+        int(min(h - crop_bottom + pad, h))
+    )
+
+
+def expand_crop_region(crop_region, processing_width, processing_height, image_width, image_height):
+    """expands crop region get_crop_region() to match the ratio of the image the region will processed in; returns expanded region
+    for example, if user drew mask in a 128x32 region, and the dimensions for processing are 512x512, the region will be expanded to 128x128."""
+
+    x1, y1, x2, y2 = crop_region
+
+    ratio_crop_region = (x2 - x1) / (y2 - y1)
+    ratio_processing = processing_width / processing_height
+
+    if ratio_crop_region > ratio_processing:
+        desired_height = (x2 - x1) / ratio_processing
+        desired_height_diff = int(desired_height - (y2-y1))
+        y1 -= desired_height_diff//2
+        y2 += desired_height_diff - desired_height_diff//2
+        if y2 >= image_height:
+            diff = y2 - image_height
+            y2 -= diff
+            y1 -= diff
+        if y1 < 0:
+            y2 -= y1
+            y1 -= y1
+        if y2 >= image_height:
+            y2 = image_height
+    else:
+        desired_width = (y2 - y1) * ratio_processing
+        desired_width_diff = int(desired_width - (x2-x1))
+        x1 -= desired_width_diff//2
+        x2 += desired_width_diff - desired_width_diff//2
+        if x2 >= image_width:
+            diff = x2 - image_width
+            x2 -= diff
+            x1 -= diff
+        if x1 < 0:
+            x2 -= x1
+            x1 -= x1
+        if x2 >= image_width:
+            x2 = image_width
+
+    return x1, y1, x2, y2
