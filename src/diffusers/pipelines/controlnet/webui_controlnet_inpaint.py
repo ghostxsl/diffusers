@@ -1338,7 +1338,8 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 )[0]
 
                 # compute predicted original sample (x_0) from sigma-scaled predicted noise
-                pred_original_sample = self.scheduler.get_pred_original_sample(noise_pred, t, latents)
+                pred_original_sample = self.scheduler.get_pred_original_sample(
+                    noise_pred, t, latents.tile([2, 1, 1, 1]) if do_classifier_free_guidance else latents)
 
                 # perform guidance
                 if do_classifier_free_guidance:
@@ -1360,6 +1361,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
 
+        if num_channels_unet == 4:
+            # inpaint
+            init_mask = mask[:1]
+            latents = (1 - init_mask) * image_latents[:1] + init_mask * latents
         # If we do sequential model offloading, let's offload unet and controlnet
         # manually for max memory savings
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
