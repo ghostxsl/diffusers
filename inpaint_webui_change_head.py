@@ -8,7 +8,7 @@ from collections import defaultdict
 from diffusers import ControlNetModel
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import MultiControlNetModel
 from diffusers import WebUIStableDiffusionControlNetInpaintPipeline
-from diffusers.schedulers import EulerAncestralDiscreteScheduler
+from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 import extensions.ESRGAN.test as esrgan
 from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
 from mmpose.blendpose.inferencer import VIPPoseInferencer
@@ -100,7 +100,7 @@ controlnet = MultiControlNetModel([pose_model])
 pipe_control = WebUIStableDiffusionControlNetInpaintPipeline.from_pretrained(
     base_path, controlnet=controlnet, torch_dtype=dtype).to(device)
 pipe_head = load_lora_weights(pipe_control, lora_model_path, lora_ratio, device="cuda", dtype=dtype)
-pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe_control.scheduler.config)
+pipe_control.scheduler = KDPMPP2MDiscreteScheduler.from_config(pipe_control.scheduler.config)
 load_webui_textual_inversion("embedding", pipe_control)
 
 # load pose model
