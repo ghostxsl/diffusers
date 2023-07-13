@@ -1,7 +1,24 @@
+# Copyright 2023 The VIP AIGC Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import random
 from PIL import Image, ImageOps, ImageDraw
 import numpy as np
 import cv2
+import torch
+
+from .torch_utils import randn_tensor
 
 
 def get_fixed_seed(seed):
@@ -183,3 +200,43 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
             x2 = image_width
 
     return x1, y1, x2, y2
+
+
+# from https://discuss.pytorch.org/t/help-regarding-slerp-function-for-generative-model-sampling/32475/3
+def slerp(low, high, val=0.):
+    low_norm = low/torch.norm(low, dim=1, keepdim=True)
+    high_norm = high/torch.norm(high, dim=1, keepdim=True)
+    dot = (low_norm*high_norm).sum(1)
+
+    if dot.mean() > 0.9995:
+        return low * val + high * (1 - val)
+
+    omega = torch.acos(dot)
+    so = torch.sin(omega)
+    res = (torch.sin((1.0-val)*omega)/so).unsqueeze(1)*low + (torch.sin(val*omega)/so).unsqueeze(1) * high
+    return res
+
+
+def create_random_tensors(noise_shape, generator, subseeds=-1, subseed_strength=0.0,
+                          device=torch.device("cpu"), dtype=torch.float32):
+    if subseeds == -1:
+        if isinstance(generator, list):
+            sub_generator = [
+                torch.Generator(device).manual_seed(
+                    get_fixed_seed(-1)) for _ in generator]
+        else:
+            sub_generator = torch.Generator(device).manual_seed(get_fixed_seed(-1))
+    elif isinstance(subseeds, list) and isinstance(generator, list):
+        assert len(subseeds) == len(generator)
+        sub_generator = [
+            torch.Generator(device).manual_seed(
+                get_fixed_seed(s)) for s in subseeds]
+    elif isinstance(subseeds, (int, float)) and isinstance(generator, torch.Generator):
+        sub_generator = torch.Generator(device).manual_seed(subseeds)
+    else:
+        raise Exception(f"Unknown parameter `subseeds`: {subseeds}")
+
+    noise = randn_tensor(noise_shape, generator=generator, device=device, dtype=dtype)
+    subnoise = randn_tensor(noise_shape, generator=sub_generator, device=device, dtype=dtype)
+
+    return slerp(noise, subnoise, subseed_strength)
