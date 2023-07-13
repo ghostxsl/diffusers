@@ -38,9 +38,9 @@ def load_image(image_path):
     return image.convert("RGB")
 
 
-def mask_process(mask, inpainting_mask_invert=True, blur=4):
+def mask_process(mask, invert_mask=True, blur=4):
     mask = mask.convert("L")
-    if inpainting_mask_invert:
+    if invert_mask:
         mask = ImageOps.invert(mask)
     if blur > 0:
         np_mask = np.array(mask)
