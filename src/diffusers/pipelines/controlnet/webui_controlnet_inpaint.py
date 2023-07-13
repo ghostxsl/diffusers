@@ -34,8 +34,8 @@ from ...utils import (
     is_accelerate_version,
     is_compiled_module,
     logging,
-    randn_tensor,
     replace_example_docstring,
+    create_random_tensors,
 )
 from ..pipeline_utils import DiffusionPipeline
 from ..stable_diffusion import StableDiffusionPipelineOutput
@@ -879,7 +879,7 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             image_latents = self._encode_vae_image(image=image, generator=generator)
 
         if latents is None:
-            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            noise = create_random_tensors(shape, generator, device=device, dtype=dtype)
             # if strength is 1. then initialise the latents to noise, else initial to image + noise
             latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
             # if pure noise then scale the initial latents by the  Scheduler's init sigma
@@ -969,7 +969,7 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
         if isinstance(generator, list):
             image_latents = [
-                self.vae.encode(image[i : i + 1]).latent_dist.sample(generator=generator[i])
+                self.vae.encode(image[i: i + 1]).latent_dist.sample(generator=generator[i])
                 for i in range(image.shape[0])
             ]
             image_latents = torch.cat(image_latents, dim=0)
