@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import cv2
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageOps
 import torch
 import safetensors
 from collections import defaultdict
@@ -120,7 +120,7 @@ pos_prompt_embs, neg_prompt_embs = prompt_preprocess(prompt, negative_prompt, pi
 
 input_size = (1024, 1024)
 seed = get_fixed_seed(179174)
-generator = torch.Generator("cuda").manual_seed(seed)
+generator = torch.Generator(device).manual_seed(seed)
 print(f'processing seed = {seed}')
 
 img_file = "/xsl/wilson.xu/case/test_0.jpg"
