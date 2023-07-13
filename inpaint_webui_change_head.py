@@ -9,7 +9,6 @@ from diffusers import ControlNetModel
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import MultiControlNetModel
 from diffusers import WebUIStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
-import extensions.ESRGAN.test as esrgan
 from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
 from mmpose.blendpose.inferencer import VIPPoseInferencer
 
@@ -17,17 +16,18 @@ from diffusers.utils.promt_parser import get_promt_embedding, load_webui_textual
 from diffusers.utils.webui_utils import *
 
 
-def prompt_preprocess(pos_prompt, neg_prompt, pipe, device=torch.device("cuda")):
+def prompt_preprocess(pos_prompt, neg_prompt, pipe, is_padding=True, device=torch.device("cuda")):
     pos_embeds = get_promt_embedding(pos_prompt, pipe.tokenizer, pipe.text_encoder, device)
     neg_embeds = get_promt_embedding(neg_prompt, pipe.tokenizer, pipe.text_encoder, device)
-    # pad embedding
-    len_pos, len_neg = pos_embeds.shape[1], neg_embeds.shape[1]
-    if len_pos > len_neg:
-        pad_embed = neg_embeds[:, -1].unsqueeze(1).repeat(1, len_pos - len_neg, 1)
-        neg_embeds = torch.cat([neg_embeds, pad_embed], dim=1)
-    elif len_neg > len_pos:
-        pad_embed = pos_embeds[:, -1].unsqueeze(1).repeat(1, len_neg - len_pos, 1)
-        pos_embeds = torch.cat([pos_embeds, pad_embed], dim=1)
+    if is_padding:
+        # pad embedding
+        len_pos, len_neg = pos_embeds.shape[1], neg_embeds.shape[1]
+        if len_pos > len_neg:
+            pad_embed = neg_embeds[:, -1].unsqueeze(1).repeat(1, len_pos - len_neg, 1)
+            neg_embeds = torch.cat([neg_embeds, pad_embed], dim=1)
+        elif len_neg > len_pos:
+            pad_embed = pos_embeds[:, -1].unsqueeze(1).repeat(1, len_neg - len_pos, 1)
+            pos_embeds = torch.cat([pos_embeds, pad_embed], dim=1)
     return pos_embeds, neg_embeds
 
 
@@ -115,7 +115,7 @@ pose_inferencer = VIPPoseInferencer(det_config, det_checkpoint,
 # prompt_embedding
 prompt = "1girl,smile,solo,(best quality),(masterpiece:1.1), upper body, long black hair, cute, clear facial skin"
 negative_prompt = "(cross-eye:2), EasyNegative, paintings, sketches, (worst quality:2), (low quality:2), (normal quality:2), lowres, normal quality, ((monochrome)), ((grayscale)), skin spots, acnes, skin blemishes, age spot, glans,extra fingers,fewer fingers,, paintings, sketches, (worst quality:2), (low quality:2), (normal quality:2), lowres, normal quality, ((monochrome)), ((grayscale)), skin spots, acnes, skin blemishes, age spot, glans, (only body)"
-pos_prompt_embs, neg_prompt_embs = prompt_preprocess(prompt, negative_prompt, pipe_control, device)
+pos_prompt_embs, neg_prompt_embs = prompt_preprocess(prompt, negative_prompt, pipe_control, device=device)
 
 
 input_size = (1024, 1024)
@@ -128,27 +128,12 @@ mask_file = "/xsl/wilson.xu/case/test_0_mask.jpg"
 save_dir = f'./output'
 os.makedirs(save_dir, exist_ok=True)
 
-### processing input ###
+# load image and inpaint mask
 init_image = load_image(img_file)
-# TODO: scale any size input
-upscale = 1 if init_image.size[1] < 1024 else 0
-print(f"image_size = {init_image.size}, upscale = {upscale}")
-if upscale:
-    w, h = init_image.size
-    init_image = Image.fromarray(esrgan.upscale(
-        np.asarray(init_image))).resize((w * 2, h * 2))  # 放大四倍再resize回2倍
-if init_image.size[0] < input_size[0] or init_image.size[1] < input_size[1]:
-    bgImg: Image.Image = Image.new("RGB", input_size, (255, 255, 255))
-    bgImg.paste(init_image, (round((input_size[0] - init_image.size[0]) / 2), round((input_size[1] - init_image.size[1]) / 2)))
-    init_image = bgImg
-else:
-    init_image = init_image.resize(input_size)
-# inpaint mask
-ori_mask = load_image(mask_file)
-mask_image = mask_process(ori_mask, inpainting_mask_invert=False)
+mask_image = mask_process(load_image(mask_file), invert_mask=False)
 
 # # clothing canny
-# canny_image = cv2.Canny(np.array(ori_mask), 100, 200)[..., None]
+# canny_image = cv2.Canny(np.array(mask_image), 100, 200)[..., None]
 # canny_image = np.tile(canny_image, [1, 1, 3])
 # canny_image = Image.fromarray(canny_image)
 
@@ -156,7 +141,7 @@ mask_image = mask_process(ori_mask, inpainting_mask_invert=False)
 pose_image = Image.fromarray(pose_inferencer(np.array(init_image)))
 
 ### start pipeline ###
-pipe1_list, has_nsfw_concept_1 = pipe_control(
+pipe1_list = pipe_control(
         image=init_image,
         mask_image=mask_image,
         control_image=[pose_image],
@@ -170,53 +155,46 @@ pipe1_list, has_nsfw_concept_1 = pipe_control(
         prompt_embeds=pos_prompt_embs,
         negative_prompt_embeds=neg_prompt_embs,
         return_dict=False,
-        controlnet_conditioning_scale=1.0,)
-
-# np_mask = np.array(mask_image, dtype=np.float32) / 255
-# np_mask = np.around(np_mask)[..., None]
-# for i, out_img in enumerate(pil_img_list):
-#     pil_img_list[i] = Image.fromarray(
-#         np.uint8(np.array(out_img) * np_mask + np.array(init_image) * (1 - np_mask)))
-
+        controlnet_conditioning_scale=1.0,
+        invert_mask=False,
+        mask_blur=4)
 
 # 2. Adetailer
-for i, is_valid in enumerate(has_nsfw_concept_1):
-    if not is_valid:
-        img = pipe1_list[i]
-        bboxes, masks, preview = mediapipe_face_detection(img)
-        for mask in masks:
-            mask = mask_process(mask, inpainting_mask_invert=False)
-            crop_region = get_crop_region(np.array(mask), pad=32)
-            crop_region = expand_crop_region(crop_region,
-                                             input_size[1], input_size[0],
-                                             mask.width, mask.height)
-            mask = mask.crop(crop_region)
-            img2 = img.crop(crop_region)
-            pipe2_list, has_nsfw_concept = pipe_control(
-                image=img2,
-                mask_image=mask,
-                control_image=[pose_image],
-                height=input_size[0],
-                width=input_size[1],
-                strength=0.2,
-                num_inference_steps=20,
-                guidance_scale=6,  # CFGscale
-                num_images_per_prompt=1,
-                generator=generator,
-                prompt_embeds=pos_prompt_embs,
-                negative_prompt_embeds=neg_prompt_embs,
-                return_dict=False,
-                controlnet_conditioning_scale=0.)
-            pipe2_list = apply_codeformer(face_restored_path, pipe2_list)
-            x1, y1, x2, y2 = crop_region
-            img.paste(
-                pipe2_list[0].resize(
-                    (int(x2 - x1), int(y2 - y1)), resample=Image.LANCZOS),
-                (x1, y1))
-        pipe1_list[i] = img
+for i, img in enumerate(pipe1_list):
+    bboxes, masks, preview = mediapipe_face_detection(img)
+    for mask in masks:
+        mask = mask_process(mask, invert_mask=False)
+        crop_region = get_crop_region(np.array(mask), pad=32)
+        crop_region = expand_crop_region(crop_region,
+                                         input_size[1], input_size[0],
+                                         mask.width, mask.height)
+        mask = mask.crop(crop_region)
+        img2 = img.crop(crop_region)
+        pipe2_list = pipe_control(
+            image=img2,
+            mask_image=mask,
+            control_image=[pose_image],
+            height=input_size[0],
+            width=input_size[1],
+            strength=0.2,
+            num_inference_steps=20,
+            guidance_scale=6,  # CFGscale
+            num_images_per_prompt=1,
+            generator=generator,
+            prompt_embeds=pos_prompt_embs,
+            negative_prompt_embeds=neg_prompt_embs,
+            return_dict=False,
+            controlnet_conditioning_scale=0.)
+        pipe2_list = apply_codeformer(face_restored_path, pipe2_list)
+        x1, y1, x2, y2 = crop_region
+        img.paste(
+            pipe2_list[0].resize(
+                (int(x2 - x1), int(y2 - y1)), resample=Image.LANCZOS),
+            (x1, y1))
+    pipe1_list[i] = img
 
 # save images
-final = np.concatenate([init_image, ori_mask, pose_image], axis=1)
+final = np.concatenate([init_image, mask_image.convert("RGB"), pose_image], axis=1)
 for i, out_img in enumerate(pipe1_list):
     Image.fromarray(
         np.uint8(np.concatenate((final, out_img), axis=1))).save(
