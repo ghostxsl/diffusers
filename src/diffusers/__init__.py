@@ -382,6 +382,7 @@ else:
             "WuerstchenCombinedPipeline",
             "WuerstchenDecoderPipeline",
             "WuerstchenPriorPipeline",
+            "VIPStableDiffusionControlNetInpaintPipeline",
         ]
     )
 
