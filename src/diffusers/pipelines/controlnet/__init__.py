@@ -30,7 +30,7 @@ else:
     _import_structure["pipeline_controlnet_inpaint_sd_xl"] = ["StableDiffusionXLControlNetInpaintPipeline"]
     _import_structure["pipeline_controlnet_sd_xl"] = ["StableDiffusionXLControlNetPipeline"]
     _import_structure["pipeline_controlnet_sd_xl_img2img"] = ["StableDiffusionXLControlNetImg2ImgPipeline"]
-    _import_structure["webui_controlnet_inpaint"] = ["WebUIStableDiffusionControlNetInpaintPipeline"]
+    _import_structure["vip_pipeline_controlnet_inpaint"] = ["VIPStableDiffusionControlNetInpaintPipeline"]
 try:
     if not (is_transformers_available() and is_flax_available()):
         raise OptionalDependencyNotAvailable()

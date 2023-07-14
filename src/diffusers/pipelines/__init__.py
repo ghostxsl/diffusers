@@ -142,7 +142,7 @@ else:
             "StableDiffusionXLControlNetImg2ImgPipeline",
             "StableDiffusionXLControlNetInpaintPipeline",
             "StableDiffusionXLControlNetPipeline",
-            "WebUIStableDiffusionControlNetInpaintPipeline",
+            "VIPStableDiffusionControlNetInpaintPipeline",
         ]
     )
     _import_structure["pag"].extend(
