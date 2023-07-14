@@ -135,7 +135,7 @@ else:
             "StableDiffusionXLControlNetImg2ImgPipeline",
             "StableDiffusionXLControlNetInpaintPipeline",
             "StableDiffusionXLControlNetPipeline",
-            "WebUIStableDiffusionControlNetInpaintPipeline",
+            "VIPStableDiffusionControlNetInpaintPipeline",
         ]
     )
     _import_structure["controlnet_xs"].extend(

@@ -36,10 +36,11 @@ from ...utils import (
     is_compiled_module,
     logging,
     replace_example_docstring,
+    randn_tensor,
     create_random_tensors,
+    get_promt_embedding,
 )
 from ..pipeline_utils import DiffusionPipeline
-from ..stable_diffusion import StableDiffusionPipelineOutput
 from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from .multicontrolnet import MultiControlNetModel
 
@@ -135,7 +136,7 @@ def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
     return mask, masked_image, image, image_overlay
 
 
-class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
+class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion with ControlNet guidance.
 
@@ -336,41 +337,31 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
     def _encode_prompt(
         self,
         prompt,
+        negative_prompt,
         device,
         num_images_per_prompt,
         do_classifier_free_guidance,
-        negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        padding_prompt: bool = False,
         lora_scale: Optional[float] = None,
     ):
         r"""
         Encodes the prompt into text encoder hidden states.
 
         Args:
-             prompt (`str` or `List[str]`, *optional*):
-                prompt to be encoded
+            prompt (`str`):
+                prompt to be encoded.
+            negative_prompt (`str`):
+                The prompt or prompts not to guide the image generation. Ignored when not using guidance
+                 (i.e., ignored if `guidance_scale` is less than `1`).
             device: (`torch.device`):
                 torch device
             num_images_per_prompt (`int`):
                 number of images that should be generated per prompt
             do_classifier_free_guidance (`bool`):
                 whether to use classifier free guidance or not
-            negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
-                less than `1`).
-            prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
-                argument.
             lora_scale (`float`, *optional*):
                 A lora scale that will be applied to all LoRA layers of the text encoder if LoRA layers are loaded.
         """
@@ -379,115 +370,42 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         if lora_scale is not None and isinstance(self, LoraLoaderMixin):
             self._lora_scale = lora_scale
 
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
-
-        if prompt_embeds is None:
-            # textual inversion: procecss multi-vector tokens if necessary
-            if isinstance(self, TextualInversionLoaderMixin):
-                prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
-
-            text_inputs = self.tokenizer(
-                prompt,
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
-                removed_text = self.tokenizer.batch_decode(
-                    untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
-                )
-                logger.warning(
-                    "The following part of your input was truncated because CLIP can only handle sequences up to"
-                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-                )
-
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = text_inputs.attention_mask.to(device)
-            else:
-                attention_mask = None
-
-            prompt_embeds = self.text_encoder(
-                text_input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            prompt_embeds = prompt_embeds[0]
-
+        prompt_embeds = get_promt_embedding(prompt, self.tokenizer, self.text_encoder, device)
         prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
 
-        bs_embed, seq_len, _ = prompt_embeds.shape
+        pos_len = prompt_embeds.shape[1]
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(num_images_per_prompt, pos_len, -1)
+
 
         # get unconditional embeddings for classifier free guidance
-        if do_classifier_free_guidance and negative_prompt_embeds is None:
-            uncond_tokens: List[str]
-            if negative_prompt is None:
-                uncond_tokens = [""] * batch_size
-            elif prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-            elif isinstance(negative_prompt, str):
-                uncond_tokens = [negative_prompt]
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-            else:
-                uncond_tokens = negative_prompt
-
-            # textual inversion: procecss multi-vector tokens if necessary
-            if isinstance(self, TextualInversionLoaderMixin):
-                uncond_tokens = self.maybe_convert_prompt(uncond_tokens, self.tokenizer)
-
-            max_length = prompt_embeds.shape[1]
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = uncond_input.attention_mask.to(device)
-            else:
-                attention_mask = None
-
-            negative_prompt_embeds = self.text_encoder(
-                uncond_input.input_ids.to(device),
-                attention_mask=attention_mask,
-            )
-            negative_prompt_embeds = negative_prompt_embeds[0]
-
         if do_classifier_free_guidance:
-            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
-            seq_len = negative_prompt_embeds.shape[1]
-
+            negative_prompt_embeds = get_promt_embedding(
+                negative_prompt, self.tokenizer, self.text_encoder, device)
             negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
 
+            neg_len = negative_prompt_embeds.shape[1]
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.view(num_images_per_prompt, neg_len, -1)
 
+            if padding_prompt:
+                # pad embedding
+                diff_len = abs(pos_len - neg_len)
+                if pos_len > neg_len:
+                    pad_embed = negative_prompt_embeds[:, -1].unsqueeze(1).repeat(1, diff_len, 1)
+                    negative_prompt_embeds = torch.cat([negative_prompt_embeds, pad_embed], dim=1)
+                elif neg_len > pos_len:
+                    pad_embed = prompt_embeds[:, -1].unsqueeze(1).repeat(1, diff_len, 1)
+                    prompt_embeds = torch.cat([prompt_embeds, pad_embed], dim=1)
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            if neg_len == pos_len:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            else:
+                prompt_embeds = [negative_prompt_embeds, prompt_embeds]
 
         return prompt_embeds
 
@@ -551,13 +469,11 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
     def check_inputs(
         self,
         prompt,
-        image,
+        negative_prompt,
+        control_image,
         height,
         width,
         callback_steps,
-        negative_prompt=None,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
         controlnet_conditioning_scale=1.0,
         control_guidance_start=0.0,
         control_guidance_end=1.0,
@@ -573,31 +489,11 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 f" {type(callback_steps)}."
             )
 
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
+        if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
-        if negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
-
-        if prompt_embeds is not None and negative_prompt_embeds is not None:
-            if prompt_embeds.shape != negative_prompt_embeds.shape:
-                raise ValueError(
-                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                    f" {negative_prompt_embeds.shape}."
-                )
+        if negative_prompt is not None and (not isinstance(negative_prompt, str) and not isinstance(negative_prompt, list)):
+            raise ValueError(f"`negative_prompt` has to be of type `str` or `list` but is {type(negative_prompt)}")
 
         # `prompt` needs more sophisticated handling when there are multiple
         # conditionings.
@@ -617,26 +513,27 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             or is_compiled
             and isinstance(self.controlnet._orig_mod, ControlNetModel)
         ):
-            self.check_image(image, prompt, prompt_embeds)
+            self.check_image(control_image, prompt)
         elif (
             isinstance(self.controlnet, MultiControlNetModel)
             or is_compiled
             and isinstance(self.controlnet._orig_mod, MultiControlNetModel)
         ):
-            if not isinstance(image, list):
+            if not isinstance(control_image, list):
                 raise TypeError("For multiple controlnets: `image` must be type `list`")
 
             # When `image` is a nested list:
             # (e.g. [[canny_image_1, pose_image_1], [canny_image_2, pose_image_2]])
-            elif any(isinstance(i, list) for i in image):
+            elif any(isinstance(i, list) for i in control_image):
                 raise ValueError("A single batch of multiple conditionings are supported at the moment.")
-            elif len(image) != len(self.controlnet.nets):
+            elif len(control_image) != len(self.controlnet.nets):
                 raise ValueError(
-                    f"For multiple controlnets: `image` must have the same length as the number of controlnets, but got {len(image)} images and {len(self.controlnet.nets)} ControlNets."
+                    f"For multiple controlnets: `image` must have the same length as the number of controlnets, "
+                    f"but got {len(control_image)} images and {len(self.controlnet.nets)} ControlNets."
                 )
 
-            for image_ in image:
-                self.check_image(image_, prompt, prompt_embeds)
+            for image_ in control_image:
+                self.check_image(image_, prompt)
         else:
             assert False
 
@@ -687,25 +584,16 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             if end > 1.0:
                 raise ValueError(f"control guidance end: {end} can't be larger than 1.0.")
 
-    # Copied from diffusers.pipelines.controlnet.pipeline_controlnet.StableDiffusionControlNetPipeline.check_image
-    def check_image(self, image, prompt, prompt_embeds):
+    def check_image(self, image, prompt):
         image_is_pil = isinstance(image, PIL.Image.Image)
-        image_is_tensor = isinstance(image, torch.Tensor)
-        image_is_np = isinstance(image, np.ndarray)
         image_is_pil_list = isinstance(image, list) and isinstance(image[0], PIL.Image.Image)
-        image_is_tensor_list = isinstance(image, list) and isinstance(image[0], torch.Tensor)
-        image_is_np_list = isinstance(image, list) and isinstance(image[0], np.ndarray)
 
         if (
             not image_is_pil
-            and not image_is_tensor
-            and not image_is_np
             and not image_is_pil_list
-            and not image_is_tensor_list
-            and not image_is_np_list
         ):
             raise TypeError(
-                f"image must be passed and be one of PIL image, numpy array, torch tensor, list of PIL images, list of numpy arrays or list of torch tensors, but is {type(image)}"
+                f"image must be passed and be one of `PIL image` or `list of PIL images`, but is {type(image)}"
             )
 
         if image_is_pil:
@@ -713,12 +601,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         else:
             image_batch_size = len(image)
 
-        if prompt is not None and isinstance(prompt, str):
+        if isinstance(prompt, str):
             prompt_batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
+        else:
             prompt_batch_size = len(prompt)
-        elif prompt_embeds is not None:
-            prompt_batch_size = prompt_embeds.shape[0]
 
         if image_batch_size != 1 and image_batch_size != prompt_batch_size:
             raise ValueError(
@@ -731,24 +617,15 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         image,
         width,
         height,
-        batch_size,
         num_images_per_prompt,
         device,
         dtype,
         do_classifier_free_guidance=False,
         guess_mode=False,
     ):
-        image = self.control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
-        image_batch_size = image.shape[0]
-
-        if image_batch_size == 1:
-            repeat_by = batch_size
-        else:
-            # image batch size is the same as prompt batch size
-            repeat_by = num_images_per_prompt
-
-        image = image.repeat_interleave(repeat_by, dim=0)
-
+        image = self.control_image_processor.preprocess(
+            image, height=height, width=width).to(dtype=torch.float32)
+        image = image.repeat_interleave(num_images_per_prompt, dim=0)
         image = image.to(device=device, dtype=dtype)
 
         if do_classifier_free_guidance and not guess_mode:
@@ -756,9 +633,9 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
 
         return image
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint.StableDiffusionInpaintPipeline.prepare_latents
     def prepare_latents(
         self,
+        image,
         batch_size,
         num_channels_latents,
         height,
@@ -766,12 +643,8 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         dtype,
         device,
         generator,
-        latents=None,
-        image=None,
         timestep=None,
         is_strength_max=True,
-        return_noise=False,
-        return_image_latents=False,
     ):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
         if isinstance(generator, list) and len(generator) != batch_size:
@@ -786,29 +659,16 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 "However, either the image or the noise timestep has not been provided."
             )
 
-        if return_image_latents or (latents is None and not is_strength_max):
-            image = image.to(device=device, dtype=dtype)
-            image_latents = self._encode_vae_image(image=image, generator=generator)
+        image = image.to(device=device, dtype=dtype)
+        image_latents = self._encode_vae_image(image=image, generator=generator)
 
-        if latents is None:
-            noise = create_random_tensors(shape, generator, device=device, dtype=dtype)
-            # if strength is 1. then initialise the latents to noise, else initial to image + noise
-            latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
-            # if pure noise then scale the initial latents by the  Scheduler's init sigma
-            latents = latents * self.scheduler.init_noise_sigma if is_strength_max else latents
-        else:
-            noise = latents.to(device)
-            latents = noise * self.scheduler.init_noise_sigma
+        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        # if strength is 1. then initialise the latents to noise, else initial to image + noise
+        latents = noise if is_strength_max else self.scheduler.add_noise(image_latents, noise, timestep)
+        # if pure noise then scale the initial latents by the  Scheduler's init sigma
+        latents = latents * self.scheduler.init_noise_sigma if is_strength_max else latents
 
-        outputs = (latents,)
-
-        if return_noise:
-            outputs += (noise,)
-
-        if return_image_latents:
-            outputs += (image_latents,)
-
-        return outputs
+        return latents, noise, image_latents
 
     def _default_height_width(self, height, width, image):
         # NOTE: It is possible that a list of images have different
@@ -818,20 +678,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             image = image[0]
 
         if height is None:
-            if isinstance(image, PIL.Image.Image):
-                height = image.height
-            elif isinstance(image, torch.Tensor):
-                height = image.shape[2]
-
-            height = (height // 8) * 8  # round down to nearest multiple of 8
+            height = (image.height // 8) * 8  # round down to nearest multiple of 8
 
         if width is None:
-            if isinstance(image, PIL.Image.Image):
-                width = image.width
-            elif isinstance(image, torch.Tensor):
-                width = image.shape[3]
-
-            width = (width // 8) * 8  # round down to nearest multiple of 8
+            width = (image.width // 8) * 8  # round down to nearest multiple of 8
 
         return height, width
 
@@ -842,9 +692,9 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
         # and half precision
-        mask = torch.nn.functional.interpolate(
-            mask, size=(height // self.vae_scale_factor, width // self.vae_scale_factor)
-        )
+        mask = torch.nn.functional.interpolate(mask,
+            size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
+            mode='nearest')
         mask = mask.to(device=device, dtype=dtype)
 
         masked_image = masked_image.to(device=device, dtype=dtype)
@@ -896,31 +746,23 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
-        image: Union[torch.Tensor, PIL.Image.Image] = None,
-        mask_image: Union[torch.Tensor, PIL.Image.Image] = None,
+        prompt: str = '',
+        negative_prompt: str = '',
+        image: PIL.Image.Image = None,
+        mask_image: PIL.Image.Image = None,
         control_image: Union[
-            torch.FloatTensor,
             PIL.Image.Image,
-            np.ndarray,
-            List[torch.FloatTensor],
             List[PIL.Image.Image],
-            List[np.ndarray],
         ] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength: float = 0.75,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
-        return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
@@ -928,23 +770,28 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
+        padding_prompt: bool = False,
         **kwargs
     ):
         r"""
         Function invoked when calling the pipeline for generation.
 
         Args:
-            prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
-                instead.
-            image (`torch.FloatTensor`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`,
-                    `List[List[torch.FloatTensor]]`, or `List[List[PIL.Image.Image]]`):
+            prompt (`str`):
+                The prompt or prompts to guide the image generation.
+            negative_prompt (`str`):
+                The prompt or prompts not to guide the image generation. Ignored when not using guidance
+                 (i.e., ignored if `guidance_scale` is less than `1`).
+            image (`PIL.Image.Image`, `List[PIL.Image.Image]`):
                 The ControlNet input condition. ControlNet uses this input condition to generate guidance to Unet. If
                 the type is specified as `Torch.FloatTensor`, it is passed to ControlNet as is. `PIL.Image.Image` can
                 also be accepted as an image. The dimensions of the output image defaults to `image`'s dimensions. If
                 height and/or width are passed, `image` is resized according to them. If multiple ControlNets are
                 specified in init, images must be passed as a list such that each element of the list can be correctly
                 batched for input to a single controlnet.
+            mask_image (`PIL.Image.Image`, `List[PIL.Image.Image]`):
+                The inpaint mask, 1 means the area that needs to be generated.
+            control_image (`PIL.Image.Image`, `List[PIL.Image.Image]`):
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -965,10 +812,6 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
                 1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
                 usually at the expense of lower image quality.
-            negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
-                less than `1`).
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             eta (`float`, *optional*, defaults to 0.0):
@@ -977,23 +820,9 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
-                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
-                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
-                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
-                argument.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] instead of a
-                plain tuple.
             callback (`Callable`, *optional*):
                 A function that will be called every `callback_steps` steps during inference. The function will be
                 called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
@@ -1020,12 +849,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         Examples:
 
         Returns:
-            [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] or `tuple`:
-            [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] if `return_dict` is True, otherwise a `tuple.
-            When returning a tuple, the first element is a list with the generated images, and the second element is a
-            list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
-            (nsfw) content, according to the `safety_checker`.
+            image: a list with the generated images.
         """
+        assert isinstance(prompt, str)
+        assert isinstance(negative_prompt, str)
         controlnet = self.controlnet._orig_mod if is_compiled_module(self.controlnet) else self.controlnet
 
         # 0. Default height and width to unet
@@ -1045,26 +872,17 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
+            negative_prompt,
             control_image,
             height,
             width,
             callback_steps,
-            negative_prompt,
-            prompt_embeds,
-            negative_prompt_embeds,
             controlnet_conditioning_scale,
             control_guidance_start,
             control_guidance_end,
         )
 
         # 2. Define call parameters
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
-
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -1087,14 +905,19 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         )
         prompt_embeds = self._encode_prompt(
             prompt,
+            negative_prompt,
             device,
             num_images_per_prompt,
             do_classifier_free_guidance,
-            negative_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
+            padding_prompt=padding_prompt,
             lora_scale=text_encoder_lora_scale,
         )
+        if isinstance(prompt_embeds, list):
+            prompt_embeds_dtype = prompt_embeds[0].dtype
+            is_prompt_batch = False
+        else:
+            prompt_embeds_dtype = prompt_embeds.dtype
+            is_prompt_batch = True
 
         # 4. Prepare image
         if isinstance(controlnet, ControlNetModel):
@@ -1102,11 +925,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 image=control_image,
                 width=width,
                 height=height,
-                batch_size=batch_size * num_images_per_prompt,
                 num_images_per_prompt=num_images_per_prompt,
                 device=device,
                 dtype=controlnet.dtype,
-                do_classifier_free_guidance=do_classifier_free_guidance,
+                do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
                 guess_mode=guess_mode,
             )
         elif isinstance(controlnet, MultiControlNetModel):
@@ -1117,11 +939,10 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                     image=control_image_,
                     width=width,
                     height=height,
-                    batch_size=batch_size * num_images_per_prompt,
                     num_images_per_prompt=num_images_per_prompt,
                     device=device,
                     dtype=controlnet.dtype,
-                    do_classifier_free_guidance=do_classifier_free_guidance,
+                    do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
                     guess_mode=guess_mode,
                 )
 
@@ -1142,46 +963,37 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
             num_inference_steps=num_inference_steps, strength=strength, device=device
         )
         # at which timestep to set the initial noise (n.b. 50% if strength is 0.5)
-        latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+        latent_timestep = timesteps[:1].repeat(num_images_per_prompt)
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
 
         # 6. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
         num_channels_unet = self.unet.config.in_channels
-        return_image_latents = num_channels_unet == 4
-        latents_outputs = self.prepare_latents(
-            batch_size * num_images_per_prompt,
+        latents, noise, image_latents = self.prepare_latents(
+            init_image,
+            num_images_per_prompt,
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            prompt_embeds_dtype,
             device,
             generator,
-            latents,
-            image=init_image,
             timestep=latent_timestep,
             is_strength_max=is_strength_max,
-            return_noise=True,
-            return_image_latents=return_image_latents,
         )
-
-        if return_image_latents:
-            latents, noise, image_latents = latents_outputs
-        else:
-            latents, noise = latents_outputs
 
         # 7. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
             mask,
             masked_image,
-            batch_size * num_images_per_prompt,
+            num_images_per_prompt,
             height,
             width,
-            prompt_embeds.dtype,
+            prompt_embeds_dtype,
             device,
             generator,
-            do_classifier_free_guidance,
+            do_classifier_free_guidance and is_prompt_batch,
         )
 
         # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -1201,7 +1013,7 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance and is_prompt_batch else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # controlnet(s) inference
@@ -1219,15 +1031,38 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 else:
                     cond_scale = controlnet_conditioning_scale * controlnet_keep[i]
 
-                down_block_res_samples, mid_block_res_sample = self.controlnet(
-                    control_model_input,
-                    t,
-                    encoder_hidden_states=controlnet_prompt_embeds,
-                    controlnet_cond=control_image,
-                    conditioning_scale=cond_scale,
-                    guess_mode=guess_mode,
-                    return_dict=False,
-                )
+                if is_prompt_batch:
+                    down_block_res_samples, mid_block_res_sample = self.controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=controlnet_prompt_embeds,
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+                else:
+                    # forward twice
+                    down_neg, mid_neg = self.controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=controlnet_prompt_embeds[0],
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+                    down_pos, mid_pos = self.controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=controlnet_prompt_embeds[1],
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+                    down_block_res_samples = [down_neg, down_pos]
+                    mid_block_res_sample = [mid_neg, mid_pos]
 
                 if guess_mode and do_classifier_free_guidance:
                     # Infered ControlNet only for the conditional batch.
@@ -1240,15 +1075,37 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
                 if num_channels_unet == 9:
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    down_block_additional_residuals=down_block_res_samples,
-                    mid_block_additional_residual=mid_block_res_sample,
-                    return_dict=False,
-                )[0]
+                if is_prompt_batch:
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples,
+                        mid_block_additional_residual=mid_block_res_sample,
+                        return_dict=False,
+                    )[0]
+                else:
+                    # forward twice
+                    noise_pred_neg = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds[0],
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples[0],
+                        mid_block_additional_residual=mid_block_res_sample[0],
+                        return_dict=False,
+                    )[0]
+                    noise_pred_pos = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds[1],
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples[1],
+                        mid_block_additional_residual=mid_block_res_sample[1],
+                        return_dict=False,
+                    )[0]
+                    noise_pred = torch.cat([noise_pred_neg, noise_pred_pos])
 
                 # compute predicted original sample (x_0) from sigma-scaled predicted noise
                 pred_original_sample = self.scheduler.get_pred_original_sample(
@@ -1293,14 +1150,12 @@ class WebUIStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualIn
         do_denormalize = [True] * image.shape[0]
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
-        # postprocess
-        for i, img in enumerate(image):
-            img = img.convert('RGBA')
-            img.alpha_composite(image_overlay)
-            image[i] = img.convert('RGB')
+        # remove cache variables
+        if getattr(self.scheduler, 'pred_ori_sample_prev', None) is not None:
+            delattr(self.scheduler, 'pred_ori_sample_prev')
 
         # Offload last model to CPU
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
 
-        return image
+        return image, image_overlay
