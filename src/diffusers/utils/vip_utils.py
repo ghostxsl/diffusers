@@ -76,7 +76,7 @@ def mediapipe_face_detection(image, model_type=1, confidence=0.3,
         pred = face_detector.process(img_array)
 
     if pred.detections is None:
-        return []
+        return [None, None, None]
 
     preview_array = img_array.copy()
 
