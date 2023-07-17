@@ -24,7 +24,13 @@ def load_webui_textual_inversion(embeddings_dir, pipeline):
         name = splitext(file_name)[0]
         # load textual inversion embeddings
         end_id_old = len(pipeline.tokenizer)
-        pipeline.load_textual_inversion(join(embeddings_dir, file_name), name)
+        try:
+            pipeline.load_textual_inversion(join(embeddings_dir, file_name), name)
+        except Exception as e:
+            print(e)
+            print(f"{file_name} did not load due to formatting errors.")
+            continue
+
         end_id_new = len(pipeline.tokenizer)
         # register embedding
         ids = pipeline.tokenizer([name],

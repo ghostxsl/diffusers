@@ -112,7 +112,7 @@ def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
     assert isinstance(mask, PIL.Image.Image)
 
     # preprocess mask
-    mask = mask.resize((width, height), resample=PIL.Image.LANCZOS)
+    mask = mask.convert("L").resize((width, height), resample=PIL.Image.LANCZOS)
 
     mask_overlay = np.array(mask, dtype=np.float32) * 2
     mask_overlay = PIL.Image.fromarray(np.clip(mask_overlay, 0, 255).astype(np.uint8))
@@ -344,6 +344,8 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         device,
         num_images_per_prompt,
         do_classifier_free_guidance,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         padding_prompt: bool = False,
         lora_scale: Optional[float] = None,
     ):
@@ -362,6 +364,13 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 number of images that should be generated per prompt
             do_classifier_free_guidance (`bool`):
                 whether to use classifier free guidance or not
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+                argument.
             lora_scale (`float`, *optional*):
                 A lora scale that will be applied to all LoRA layers of the text encoder if LoRA layers are loaded.
         """
@@ -370,9 +379,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         if lora_scale is not None and isinstance(self, LoraLoaderMixin):
             self._lora_scale = lora_scale
 
-        prompt_embeds = get_promt_embedding(prompt, self.tokenizer, self.text_encoder, device)
-        prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+        if prompt_embeds is None:
+            prompt_embeds = get_promt_embedding(prompt, self.tokenizer, self.text_encoder, device)
 
+        prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
         pos_len = prompt_embeds.shape[1]
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -381,10 +391,11 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
-            negative_prompt_embeds = get_promt_embedding(
-                negative_prompt, self.tokenizer, self.text_encoder, device)
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+            if negative_prompt_embeds is None:
+                negative_prompt_embeds = get_promt_embedding(
+                    negative_prompt, self.tokenizer, self.text_encoder, device)
 
+            negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
             neg_len = negative_prompt_embeds.shape[1]
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -762,6 +773,8 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
@@ -820,6 +833,13 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+                provided, text embeddings will be generated from `prompt` input argument.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+                argument.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
@@ -909,6 +929,8 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             device,
             num_images_per_prompt,
             do_classifier_free_guidance,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
             padding_prompt=padding_prompt,
             lora_scale=text_encoder_lora_scale,
         )
@@ -930,11 +952,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 dtype=controlnet.dtype,
                 do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
                 guess_mode=guess_mode,
-            )
+            ) if controlnet_conditioning_scale != 0 else None
         elif isinstance(controlnet, MultiControlNetModel):
             control_images = []
-
-            for control_image_ in control_image:
+            for control_image_, control_scale_ in zip(control_image, controlnet_conditioning_scale):
                 control_image_ = self.prepare_control_image(
                     image=control_image_,
                     width=width,
@@ -944,8 +965,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                     dtype=controlnet.dtype,
                     do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
                     guess_mode=guess_mode,
-                )
-
+                ) if control_scale_ != 0 else None
                 control_images.append(control_image_)
 
             control_image = control_images
