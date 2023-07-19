@@ -117,9 +117,6 @@ def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
     mask_overlay = np.array(mask, dtype=np.float32) * 2
     mask_overlay = PIL.Image.fromarray(np.clip(mask_overlay, 0, 255).astype(np.uint8))
 
-    mask = np.array(mask, dtype=np.float32)[None, None,] / 255.0
-    mask = torch.from_numpy(np.around(mask))
-
     # preprocess image
     image = image.resize((width, height), resample=PIL.Image.LANCZOS)
     image_overlay = PIL.Image.new('RGBa', (width, height))
@@ -131,7 +128,9 @@ def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
     image = torch.from_numpy(image).to(torch.float32) / 255.0
     image = 2. * image - 1.
 
-    masked_image = image * (mask < 0.5)
+    torch_mask = np.array(mask, dtype=np.float32)[None, None,]
+    torch_mask = torch.from_numpy(torch_mask)
+    masked_image = image * (torch_mask < 127.5)
 
     return mask, masked_image, image, image_overlay
 
@@ -703,9 +702,12 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
         # and half precision
-        mask = torch.nn.functional.interpolate(mask,
-            size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
-            mode='nearest')
+        # mask = torch.nn.functional.interpolate(mask,
+        #     size=(height // self.vae_scale_factor, width // self.vae_scale_factor),
+        #     mode='nearest')
+        mask = mask.resize((width // self.vae_scale_factor, height // self.vae_scale_factor))
+        mask = torch.from_numpy(np.array(mask, dtype=np.float32)[None, None,])
+        mask = torch.round(mask / 255.0).to(device=device, dtype=dtype)
         mask = mask.to(device=device, dtype=dtype)
 
         masked_image = masked_image.to(device=device, dtype=dtype)
