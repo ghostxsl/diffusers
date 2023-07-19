@@ -53,6 +53,24 @@ def mask_process(mask, invert_mask=True, blur=4):
     return mask
 
 
+def create_mask_from_bbox(bboxes, shape):
+    masks = []
+    for bbox in bboxes:
+        mask = Image.new("L", shape, 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rectangle(bbox, fill=255)
+        masks.append(mask)
+    return masks
+
+
+def create_mask_from_bbox_to_one_img(bboxes, shape):
+    mask = Image.new("L", shape, 0)
+    mask_draw = ImageDraw.Draw(mask)
+    for bbox in bboxes:
+        mask_draw.rectangle(bbox, fill=255)
+    return mask
+
+
 def mediapipe_face_detection(image, model_type=1, confidence=0.3,
                              dilate=4, erode=0):
     """
@@ -93,15 +111,6 @@ def mediapipe_face_detection(image, model_type=1, confidence=0.3,
         y2 = y1 + h
 
         bboxes.append([x1, y1, x2, y2])
-
-    def create_mask_from_bbox(bboxes, shape):
-        masks = []
-        for bbox in bboxes:
-            mask = Image.new("L", shape, 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.rectangle(bbox, fill=255)
-            masks.append(mask)
-        return masks
 
     masks = create_mask_from_bbox(bboxes, image.size)
     preview = Image.fromarray(preview_array)
