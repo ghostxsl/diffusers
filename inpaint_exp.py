@@ -5,7 +5,7 @@ from PIL import Image
 from diffusers import ControlNetModel
 from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
-from diffusers import VIPStableDiffusionControlNetInpaintPipeline, StableDiffusionControlNetImg2ImgPipeline, \
+from diffusers import VIPStableDiffusionControlNetInpaintPipeline, \
     UniPCMultistepScheduler
 
 from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
@@ -15,18 +15,13 @@ from diffusers.utils.promt_parser import load_webui_textual_inversion
 from diffusers.utils.vip_utils import *
 
 
-# len[False] = num_images_per_prompt
-def dummy(images, **kwargs):
-    return images, [False] * 4
-
-
 def get_controlnet(pro_type, root_dir, dtype=torch.float16, device=torch.device("cuda")):
     if pro_type[0] == 'a':
         base_path = f'{root_dir}/weights/braBeautifulRealistic_brav3'
     else:
         base_path = f'{root_dir}/weights/CyberRealistic_V3.0-FP32'
 
-    pose_path = f'{root_dir}/weights/control_v11p_sd15_openpose'
+    pose_path = f'{root_dir}/weights/exp_control_v11p_sd15_openpose'
     canny_path = f'{root_dir}/weights/control_v11p_sd15_canny'
     controlnet1 = ControlNetModel.from_pretrained(pose_path, torch_dtype=dtype).to(device)
     controlnet2 = ControlNetModel.from_pretrained(canny_path, torch_dtype=dtype).to(device)
@@ -37,33 +32,8 @@ def get_controlnet(pro_type, root_dir, dtype=torch.float16, device=torch.device(
     pipe_control.scheduler = KDPMPP2MDiscreteScheduler.from_config(pipe_control.scheduler.config)
     load_webui_textual_inversion("embedding", pipe_control)
     pipe_control.enable_model_cpu_offload()
-    pipe_control.enable_xformers_memory_efficient_attention()
+    # pipe_control.enable_xformers_memory_efficient_attention()
     return pipe_control
-
-
-def get_img2img_pipline(pro_type, root_dir, dtype=torch.float16, device=torch.device("cuda")):
-    # ratio = 0.3
-    # base_path = f"models/LoRAs/AsianMale/AsianMale_{ratio}"
-    if pro_type.split('_')[0] == 'a':
-        base_path = f'{root_dir}/weights/braBeautifulRealistic_brav3'
-    else:
-        base_path = f'{root_dir}/weights/CyberRealistic_V3.0-FP32'
-
-    pose_path = f'{root_dir}/weights/control_v11p_sd15_openpose'
-    canny_path = f'{root_dir}/weights/control_v11p_sd15_canny'
-    depth_path = f'{root_dir}/weights/control_v11f1p_sd15_depth'
-    controlnet1 = ControlNetModel.from_pretrained(pose_path, torch_dtype=dtype).to(device)
-    controlnet2 = ControlNetModel.from_pretrained(canny_path, torch_dtype=dtype).to(device)
-    controlnet3 = ControlNetModel.from_pretrained(depth_path, torch_dtype=dtype).to(device)
-    controlnet = MultiControlNetModel([controlnet1, controlnet2, controlnet3])
-
-    pipe_img2img = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        base_path, controlnet=controlnet, torch_dtype=torch.float16)
-    pipe_img2img.scheduler = UniPCMultistepScheduler.from_config(pipe_img2img.scheduler.config)
-    pipe_img2img.enable_model_cpu_offload()
-    pipe_img2img.enable_xformers_memory_efficient_attention()
-    pipe_img2img.safety_checker = dummy
-    return pipe_img2img
 
 
 pro_types = ["asian_woman", "asian_man", "european_woman", "european_man"]
@@ -93,28 +63,27 @@ save_dir = f'./output'
 os.makedirs(save_dir, exist_ok=True)
 
 pipe_control = get_controlnet(pro_type, init_root_dir, dtype, device)
-# pipe_img2img = get_img2img_pipline(pro_type, init_root_dir, dtype, device)
 
-# det_config = "/xsl/wilson.xu/mmpose/demo/mmdetection_cfg/rtmdet_l_8xb32-300e_coco.py"
-# det_checkpoint = "/xsl/wilson.xu/weights/rtmpose_model/rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth"
-# body_config = "/xsl/wilson.xu/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-l_8xb256-420e_body8-256x192.py"
-# body_checkpoint = "/xsl/wilson.xu/weights/rtmpose_model/rtmpose-l_simcc-body7_pt-body7_420e-256x192-4dba18fc_20230504.pth"
-# handpose_cfg = "/xsl/wilson.xu/mmpose/configs/hand_2d_keypoint/rtmpose/hand5/rtmpose-m_8xb256-210e_hand5-256x256.py"
-# handpose_pth = "/xsl/wilson.xu/weights/rtmpose_model/rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.pth"
-# template_dir = "/xsl/wilson.xu/weights/template_hand"
-# pose_inferencer = VIPPoseInferencer(det_config, det_checkpoint,
-#                                     body_config, body_checkpoint,
-#                                     use_hand=True,
-#                                     handpose_cfg=handpose_cfg,
-#                                     handpose_pth=handpose_pth,
-#                                     # template_dir=template_dir,
-#                                     kpt_thr=0.3, device=device)
+det_config = "/xsl/wilson.xu/mmpose/mmpose/blendpose/configs/rtmdet_l_8xb32-300e_coco.py"
+det_checkpoint = "/xsl/wilson.xu/weights/rtmpose_model/rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth"
+body_config = "/xsl/wilson.xu/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-l_8xb256-420e_body8-256x192.py"
+body_checkpoint = "/xsl/wilson.xu/weights/rtmpose_model/rtmpose-l_simcc-body7_pt-body7_420e-256x192-4dba18fc_20230504.pth"
+wholebody_cfg = f"{init_root_dir}/mmpose/mmpose/blendpose/configs/dwpose_l_wholebody_384x288.py"
+wholebody_pth = f"{init_root_dir}/weights/rtmpose_model/dw-ll_ucoco_384.pth"
+pose_inferencer = VIPPoseInferencer(det_config, det_checkpoint,
+                                    body_config, body_checkpoint,
+                                    wholebodypose_cfg=wholebody_cfg,
+                                    wholebodypose_pth=wholebody_pth,
+                                    return_results=True,
+                                    body_kpt_thr=0.3,
+                                    hand_kpt_thr=0.3,
+                                    device=device)
 
-pose_inferencer = OpenposeDetector(use_hand=True,
-                                   body_pth="/xsl/wilson.xu/weights/openpose_model/body_pose_model.pth",
-                                   hand_pth="/xsl/wilson.xu/weights/openpose_model/hand_pose_model.pth",
-                                   return_results=True,
-                                   device=device)
+# pose_inferencer = OpenposeDetector(use_hand=True,
+#                                    body_pth="/xsl/wilson.xu/weights/openpose_model/body_pose_model.pth",
+#                                    hand_pth="/xsl/wilson.xu/weights/openpose_model/hand_pose_model.pth",
+#                                    return_results=True,
+#                                    device=device)
 
 names = os.listdir(os.path.join(save_mask_root, pro_type.split('_')[1]))
 for i, name in enumerate(names):
@@ -124,7 +93,7 @@ for i, name in enumerate(names):
     init_image = load_image(img_path).resize(input_size, resample=Image.LANCZOS)
     print(f"image_size = {init_image.size}")
 
-    clo_mask_path = os.path.join(save_mask_root, pro_type.split('_')[1], name, "1.png")
+    clo_mask_path = os.path.join(save_mask_root, pro_type.split('_')[1], name, "clothing_mask.png")
     ori_mask = load_image(clo_mask_path)
     clo_mask = ori_mask.resize(input_size, resample=Image.LANCZOS)
 
@@ -155,9 +124,9 @@ for i, name in enumerate(names):
         control_image=[pose_image, canny_image],
         height=input_size[0],
         width=input_size[1],
-        strength=0.75,
-        num_inference_steps=35,
-        guidance_scale=7,  # CFGscale
+        strength=0.8,
+        num_inference_steps=30,
+        guidance_scale=9,  # CFGscale
         num_images_per_prompt=batch_size,
         generator=generator,
         controlnet_conditioning_scale=1.0, )
@@ -173,83 +142,93 @@ for i, name in enumerate(names):
 
     # 2. Hand repair
     mask_pad = 32
-    for img in pipe1_list:
+    for j, img in enumerate(pipe1_list):
         # get pose
         pose_image, pose_res = pose_inferencer(np.array(img), hand=True)
         pose_image = Image.fromarray(pose_image)
-        hand_kpts = np.asarray(pose_res['hand']['keypoints']) * np.array(input_size)
+        hand_kpts = pose_res['hand']['keypoints'][..., :2] * np.array(input_size)
+        hand_scores = pose_res['hand']['keypoints'][..., 2]
+
         hand_bboxes = []
-        for kpts in hand_kpts:
-            kpt = np.take(kpts, np.nonzero(kpts.sum(-1) > 0)[0], axis=0)
+        for kpts, score in zip(hand_kpts, hand_scores):
+            kpt = np.take(kpts, np.nonzero(score > 0.3)[0], axis=0)
             x1, y1 = np.min(kpt, axis=0)
             x2, y2 = np.max(kpt, axis=0)
             hand_bboxes.append([x1 - mask_pad, y1 - mask_pad, x2 + mask_pad, y2 + mask_pad])
-        mask_image = create_mask_from_bbox_to_one_img(hand_bboxes, input_size)
-        mask_image = mask_process(mask_image, invert_mask=False)
 
-        pipe2_list, image2_overlay = pipe_control(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=img,
-            mask_image=mask_image,
-            control_image=[pose_image, canny_image],
-            height=input_size[0],
-            width=input_size[1],
-            strength=0.4,
-            num_inference_steps=30,
-            guidance_scale=9,  # CFGscale
-            num_images_per_prompt=batch_size,
-            generator=generator,
-            controlnet_conditioning_scale=0.0, )
+        masks = create_mask_from_bbox(hand_bboxes, input_size)
+        for mask in masks:
+            mask = mask_process(mask, invert_mask=False)
+            crop_region = get_crop_region(np.array(mask), pad=mask_pad)
+            crop_region = expand_crop_region(crop_region,
+                                             input_size[1], input_size[0],
+                                             mask.width, mask.height)
+            mask = mask.crop(crop_region)
+            img2 = img.crop(crop_region)
+            pose_image2 = pose_image.crop(crop_region)
 
-        pipe2_list = alpha_composite(pipe2_list, image2_overlay)
-        pipe2_list = alpha_composite(pipe2_list, image1_overlay)
+            pipe2_list, image2_overlay = pipe_control(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                image=img2,
+                mask_image=mask,
+                control_image=[pose_image2, canny_image],
+                height=input_size[0],
+                width=input_size[1],
+                strength=0.3,
+                num_inference_steps=30,
+                guidance_scale=9,  # CFGscale
+                num_images_per_prompt=batch_size,
+                generator=generator,
+                controlnet_conditioning_scale=[1.0, 0.0], )
+            pipe2_list = alpha_composite(pipe2_list, image2_overlay)
+            # Paste back according to the mask
+            x1, y1, x2, y2 = crop_region
+            img.paste(
+                pipe2_list[0].resize(
+                    (int(x2 - x1), int(y2 - y1)), resample=Image.LANCZOS),
+                (x1, y1))
+        pipe1_list[j] = img
+        pipe1_list[j].save(f"{save_dir}/{name}_2_{i}.png")
 
-        pipe2_list[0].save(f"{save_dir}/{name}_2_{i}.png")
+    # # 3. Hand repair
+    # mask_pad = 32
+    # for img in pipe1_list:
+    #     # get pose
+    #     pose_image, pose_res = pose_inferencer(np.array(img), hand=True)
+    #     pose_image = Image.fromarray(pose_image)
+    #     hand_kpts = pose_res['hand']['keypoints'][..., :2] * np.array(input_size)
+    #     hand_scores = pose_res['hand']['keypoints'][..., 2]
+
+    #     hand_bboxes = []
+    #     for kpts, score in zip(hand_kpts, hand_scores):
+    #         kpt = np.take(kpts, np.nonzero(score > 0.3)[0], axis=0)
+    #         x1, y1 = np.min(kpt, axis=0)
+    #         x2, y2 = np.max(kpt, axis=0)
+    #         hand_bboxes.append([x1 - mask_pad, y1 - mask_pad, x2 + mask_pad, y2 + mask_pad])
+    #     mask_image = create_mask_from_bbox_to_one_img(hand_bboxes, input_size)
+    #     mask_image = mask_process(mask_image, invert_mask=False)
+
+    #     pipe2_list, image2_overlay = pipe_control(
+    #         prompt=prompt,
+    #         negative_prompt=negative_prompt,
+    #         image=img,
+    #         mask_image=mask_image,
+    #         control_image=[pose_image, canny_image],
+    #         height=input_size[0],
+    #         width=input_size[1],
+    #         strength=0.4,
+    #         num_inference_steps=30,
+    #         guidance_scale=9,  # CFGscale
+    #         num_images_per_prompt=batch_size,
+    #         generator=generator,
+    #         controlnet_conditioning_scale=0.0, )
+
+    #     pipe2_list = alpha_composite(pipe2_list, image2_overlay)
+
+    #     pipe2_list[0].save(f"{save_dir}/{name}_2_{i}.png")
 
     # final = np.concatenate([init_image.resize(input_size),
     #                         mask_image.convert("RGB").resize(input_size),
     #                         pose_image.resize(input_size),
     #                         canny_image.resize(input_size)], axis=1)
-
-    # # img2img fix cloth boundary
-    # index = 0
-    # for output_image in hand_fix_out_imgs:
-    #     openpose_image, face_points, _, _ = get_openpose.process(np.asarray(output_image),
-    #                                                              image_resolution=input_size[0])
-    #     openpose_image = Image.fromarray(openpose_image)
-    #     canny_image = Image.fromarray(get_canny.process(np.asarray(output_image), input_size[0], 100, 200))
-    #     depth_image = Image.fromarray(get_depth.process(np.asarray(init_image), input_size[0], input_size[1]))
-    #     index += 1
-    #     output_image2 = init_image * (1 - np_mask) + output_image * np_mask
-    #     staget2_input = Image.fromarray(output_image2.astype(np.uint8))
-    #     fixed_images, has_nsfw_concept = list(
-    #         pipe_img2img(
-    #             prompt_embeds=pos_prompt_embs,
-    #             negative_prompt_embeds=neg_prompt_embs,
-    #             image=staget2_input,
-    #             control_image=[openpose_image, canny_image, depth_image],
-    #             height=input_size[0],
-    #             width=input_size[1],
-    #             generator=generator,
-    #             guidance_scale=3,  # CFGscale
-    #             num_images_per_prompt=1,
-    #             num_inference_steps=20,
-    #             strength=0.35,
-    #         ).values())
-    #     ### paste mote body ###
-    #     fixed_images = apply_codeformer(face_restored_path, fixed_images)
-    #     output_image3 = fixed_images[0] * np_mask + init_image * (1 - np_mask)
-    #     # output_image3 = fixed_images[0]
-    #     # bg_salient_image = Salient_Object_Det.inference(Image.fromarray(output_image))
-    #     # output_image[bg_salient_image <= 235] = 255
-    #     # final = np.concatenate((final, fixed_images[0]), axis=1)
-    #     final = np.concatenate((final, output_image3.astype(np.uint8)), axis=1)
-    #     name = os.path.basename(img_path).replace(".JPG", ".png")
-    #     save_dir2 = os.path.join(save_dir, name)
-    #     os.makedirs(save_dir2, exist_ok=True)
-    #     output_image3 = Image.fromarray(output_image3.astype(np.uint8))
-    #     output_image3.save(f'{save_dir2}/{pro_type}_result_%01d_{name}' % index)
-    # final = Image.fromarray(final)
-    # name = os.path.basename(img_path).replace(".JPG", ".png")
-    # final.save(f'{save_dir2}/tryon_result_show_{name}')

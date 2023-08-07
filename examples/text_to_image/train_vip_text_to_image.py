@@ -27,14 +27,11 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
-import pandas
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
-from PIL import Image, ImageOps
-from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from transformers.utils import ContextManagers
@@ -45,6 +42,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
+from diffusers.data import T2IDataset, t2i_collate_fn
 
 
 if is_wandb_available():
@@ -132,91 +130,6 @@ def compute_snr(timesteps, alphas_cumprod):
     # Compute SNR.
     snr = (alpha / sigma) ** 2
     return snr
-
-
-class T2IDataset(torch.utils.data.Dataset):
-    """
-    A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
-    It pre-processes the images and the tokenizes prompts.
-    """
-
-    def __init__(
-        self,
-        dataset_csv,
-        train_data_dir,
-        tokenizer,
-        img_size=512,
-        center_crop=False,
-        random_flip=False,
-        drop_text=0.1,
-        keep_in_memory=False
-    ):
-        assert os.path.exists(dataset_csv)
-        assert os.path.exists(train_data_dir)
-        if drop_text < 0. or drop_text > 1.:
-            raise ValueError("`drop_text` must be in the range [0., 1.].")
-
-        self.dataset_csv = dataset_csv
-        self.train_data_dir = train_data_dir
-        self.tokenizer = tokenizer
-        self.center_crop = center_crop
-        self.random_flip = random_flip
-        self.drop_text = drop_text
-        self.keep_in_memory = keep_in_memory
-        self.empty_text_inputs = tokenizer(
-            "", max_length=tokenizer.model_max_length,
-            padding="max_length", truncation=True, return_tensors="pt")
-
-        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
-        self._length = len(self.metadata)
-        self.image_list = []
-        if keep_in_memory:
-            for name, caption in tqdm(self.metadata):
-                img = Image.open(os.path.join(train_data_dir, name)).convert("RGB")
-                img = ImageOps.exif_transpose(img)
-                self.image_list.append(img)
-
-        self.image_transforms = transforms.Compose(
-            [
-                transforms.Resize(img_size, interpolation=transforms.InterpolationMode.LANCZOS),
-                transforms.CenterCrop(img_size) if self.center_crop else transforms.RandomCrop(img_size),
-                transforms.RandomHorizontalFlip() if self.random_flip else transforms.Lambda(lambda x: x),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-
-    def __len__(self):
-        return self._length
-
-    def __getitem__(self, index):
-        example = {}
-        if self.keep_in_memory:
-            example["pixel_values"] = self.image_transforms(self.image_list[index])
-        else:
-            name = self.metadata[index][0]
-            img = Image.open(os.path.join(self.train_data_dir, name)).convert("RGB")
-            img = ImageOps.exif_transpose(img)
-            example["pixel_values"] = self.image_transforms(img)
-
-        if random.random() < self.drop_text:
-            text_inputs = self.empty_text_inputs
-        else:
-            captions = self.metadata[index][1]
-            text_inputs = self.tokenizer(
-                captions, max_length=self.tokenizer.model_max_length,
-                padding="max_length", truncation=True, return_tensors="pt"
-            )
-        example["input_ids"] = text_inputs.input_ids
-
-        return example
-
-
-def collate_fn(examples):
-    pixel_values = torch.stack([example["pixel_values"] for example in examples])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-    input_ids = torch.cat([example["input_ids"] for example in examples])
-    return {"pixel_values": pixel_values, "input_ids": input_ids}
 
 
 def parse_args():
@@ -439,7 +352,6 @@ def parse_args():
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ),
     )
-    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
@@ -474,11 +386,26 @@ def parse_args():
         default=0.1,
         help="0.1 dropping of the text-conditioning to improve classifier-free guidance sampling."
     )
+    parser.add_argument(
+        "--prefetch",
+        type=int,
+        default=2,
+        help=(
+            "Number of batches loaded in advance by each worker."
+            " `2` means there will be a total of 2 * num_workers batches prefetched "
+            "across all workers. (default value depends on the set value for num_workers. "
+            "If value of num_workers=0 default is ``None``. Otherwise if value of "
+            "num_workers>0 default is `2`)."
+        ),
+    )
 
     args = parser.parse_args()
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
+    if args.drop_text < 0 or args.drop_text > 1:
+        raise ValueError("`--drop_text` must be in the range [0, 1].")
+    if args.resolution % 8 != 0:
+        raise ValueError(
+            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the unet."
+        )
 
     return args
 
@@ -665,10 +592,11 @@ def main(args):
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=t2i_collate_fn,
         num_workers=args.dataloader_num_workers,
         drop_last=True,
         pin_memory=True,
+        prefetch_factor=args.prefetch,
     )
 
     # Scheduler and math around the number of training steps.
