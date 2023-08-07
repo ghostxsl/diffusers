@@ -22,7 +22,6 @@ import random
 import shutil
 from pathlib import Path
 
-import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -31,11 +30,8 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
-from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
 
@@ -49,8 +45,9 @@ from diffusers import (
     UniPCMultistepScheduler,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
+from diffusers.data import ControlNetDataset, controlnet_collate_fn
 
 
 if is_wandb_available():
@@ -178,7 +175,31 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
         raise ValueError(f"{model_class} is not supported.")
 
 
-def parse_args(input_args=None):
+def compute_snr(timesteps, alphas_cumprod):
+    """
+    Computes SNR as per https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L847-L849
+    """
+    sqrt_alphas_cumprod = alphas_cumprod**0.5
+    sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod) ** 0.5
+
+    # Expand the tensors.
+    # Adapted from https://github.com/TiankaiHang/Min-SNR-Diffusion-Training/blob/521b624bd70c67cee4bdf49225915f5945a872e3/guided_diffusion/gaussian_diffusion.py#L1026
+    sqrt_alphas_cumprod = sqrt_alphas_cumprod.to(device=timesteps.device)[timesteps].float()
+    while len(sqrt_alphas_cumprod.shape) < len(timesteps.shape):
+        sqrt_alphas_cumprod = sqrt_alphas_cumprod[..., None]
+    alpha = sqrt_alphas_cumprod.expand(timesteps.shape)
+
+    sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod.to(device=timesteps.device)[timesteps].float()
+    while len(sqrt_one_minus_alphas_cumprod.shape) < len(timesteps.shape):
+        sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod[..., None]
+    sigma = sqrt_one_minus_alphas_cumprod.expand(timesteps.shape)
+
+    # Compute SNR.
+    snr = (alpha / sigma) ** 2
+    return snr
+
+
+def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a ControlNet training script.")
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -377,9 +398,10 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--dataset_name",
+        "--dataset_csv",
         type=str,
         default=None,
+        required=True,
         help=(
             "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
             " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
@@ -387,15 +409,10 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--dataset_config_name",
-        type=str,
-        default=None,
-        help="The config of the Dataset, leave as None if there's only one config.",
-    )
-    parser.add_argument(
         "--train_data_dir",
         type=str,
         default=None,
+        required=True,
         help=(
             "A folder containing the training data. Folder contents must follow the structure described in"
             " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
@@ -403,19 +420,36 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
+        "--condition_data_dir",
+        type=str,
+        default=None,
+        required=True,
+        help=(
+            "A folder containing the conditional training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
+        ),
     )
     parser.add_argument(
-        "--conditioning_image_column",
-        type=str,
-        default="conditioning_image",
-        help="The column of the dataset containing the controlnet conditioning image.",
+        "--keep_in_memory",
+        default=False,
+        action="store_true",
+        help=(
+            "Whether to load all of data into memory at once."
+        ),
     )
     parser.add_argument(
-        "--caption_column",
-        type=str,
-        default="text",
-        help="The column of the dataset containing a caption or a list of captions.",
+        "--center_crop",
+        action="store_true",
+        help=(
+            "Whether to center crop the input images to the resolution. If not set, the images will be randomly"
+            " cropped. The images will be resized to the resolution first before cropping."
+        ),
+    )
+    parser.add_argument(
+        "--random_flip",
+        action="store_true",
+        help="whether to randomly flip images horizontally",
     )
     parser.add_argument(
         "--max_train_samples",
@@ -429,7 +463,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--drop_text",
         type=float,
-        default=0,
+        default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
@@ -458,13 +492,13 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--num_validation_images",
         type=int,
-        default=4,
+        default=1,
         help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
     )
     parser.add_argument(
         "--validation_steps",
         type=int,
-        default=100,
+        default=1000,
         help=(
             "Run validation every X steps. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`"
@@ -472,25 +506,19 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--tracker_project_name",
-        type=str,
-        default="train_controlnet",
+        "--prefetch",
+        type=int,
+        default=2,
         help=(
-            "The `project_name` argument passed to Accelerator.init_trackers for"
-            " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
+            "Number of batches loaded in advance by each worker."
+            " `2` means there will be a total of 2 * num_workers batches prefetched "
+            "across all workers. (default value depends on the set value for num_workers. "
+            "If value of num_workers=0 default is ``None``. Otherwise if value of "
+            "num_workers>0 default is `2`)."
         ),
     )
 
-    if input_args is not None:
-        args = parser.parse_args(input_args)
-    else:
-        args = parser.parse_args()
-
-    if args.dataset_name is None and args.train_data_dir is None:
-        raise ValueError("Specify either `--dataset_name` or `--train_data_dir`")
-
-    if args.dataset_name is not None and args.train_data_dir is not None:
-        raise ValueError("Specify only one of `--dataset_name` or `--train_data_dir`")
+    args = parser.parse_args()
 
     if args.drop_text < 0 or args.drop_text > 1:
         raise ValueError("`--drop_text` must be in the range [0, 1].")
@@ -519,137 +547,6 @@ def parse_args(input_args=None):
         )
 
     return args
-
-
-def make_train_dataset(args, tokenizer, accelerator):
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-    if args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
-        )
-    else:
-        if args.train_data_dir is not None:
-            dataset = load_dataset(
-                args.train_data_dir,
-                cache_dir=args.cache_dir,
-            )
-        # See more about loading custom images at
-        # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
-
-    # 6. Get the column names for input/target.
-    if args.image_column is None:
-        image_column = column_names[0]
-        logger.info(f"image column defaulting to {image_column}")
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.caption_column is None:
-        caption_column = column_names[1]
-        logger.info(f"caption column defaulting to {caption_column}")
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    if args.conditioning_image_column is None:
-        conditioning_image_column = column_names[2]
-        logger.info(f"conditioning image column defaulting to {conditioning_image_column}")
-    else:
-        conditioning_image_column = args.conditioning_image_column
-        if conditioning_image_column not in column_names:
-            raise ValueError(
-                f"`--conditioning_image_column` value '{args.conditioning_image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-            )
-
-    def tokenize_captions(examples, is_train=True):
-        captions = []
-        for caption in examples[caption_column]:
-            if random.random() < args.drop_text:
-                captions.append("")
-            elif isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-            else:
-                raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
-                )
-        inputs = tokenizer(
-            captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-        )
-        return inputs.input_ids
-
-    image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-
-    conditioning_image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-        ]
-    )
-
-    def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
-        images = [image_transforms(image) for image in images]
-
-        conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
-        conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
-
-        examples["pixel_values"] = images
-        examples["conditioning_pixel_values"] = conditioning_images
-        examples["input_ids"] = tokenize_captions(examples)
-
-        return examples
-
-    with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        train_dataset = dataset["train"].with_transform(preprocess_train)
-
-    return train_dataset
-
-
-def collate_fn(examples):
-    pixel_values = torch.stack([example["pixel_values"] for example in examples])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-    conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
-    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
-
-    input_ids = torch.stack([example["input_ids"] for example in examples])
-
-    return {
-        "pixel_values": pixel_values,
-        "conditioning_pixel_values": conditioning_pixel_values,
-        "input_ids": input_ids,
-    }
 
 
 def main(args):
@@ -769,17 +666,6 @@ def main(args):
     if args.gradient_checkpointing:
         controlnet.enable_gradient_checkpointing()
 
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
-
-    if accelerator.unwrap_model(controlnet).dtype != torch.float32:
-        raise ValueError(
-            f"Controlnet loaded as datatype {accelerator.unwrap_model(controlnet).dtype}. {low_precision_error_string}"
-        )
-
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -812,16 +698,28 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    train_dataset = make_train_dataset(args, tokenizer, accelerator)
+    # Dataset and DataLoaders creation:
+    train_dataset = ControlNetDataset(
+        dataset_csv=args.dataset_csv,
+        train_data_dir=args.train_data_dir,
+        condition_data_dir=args.condition_data_dir,
+        tokenizer=tokenizer,
+        img_size=args.resolution,
+        center_crop=args.center_crop,
+        random_flip=args.random_flip,
+        drop_text=args.drop_text,
+        keep_in_memory=args.keep_in_memory,
+    )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
-        shuffle=True,
-        collate_fn=collate_fn,
         batch_size=args.train_batch_size,
+        shuffle=True,
+        collate_fn=controlnet_collate_fn,
         num_workers=args.dataloader_num_workers,
         drop_last=True,
         pin_memory=True,
+        prefetch_factor=args.prefetch,
     )
 
     # Scheduler and math around the number of training steps.
@@ -872,7 +770,7 @@ def main(args):
         # tensorboard cannot handle list types for config
         tracker_config.pop("validation_prompt")
         tracker_config.pop("validation_image")
-        accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
+        accelerator.init_trackers("train_controlnet", config=tracker_config)
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
