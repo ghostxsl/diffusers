@@ -11,5 +11,6 @@ pip install /apps/dat/cv/xsl/weights/accelerate-0.21.0.tar.gz
 pip install /apps/dat/cv/xsl/weights/pandas-2.0.3-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 pip install /apps/dat/cv/xsl/weights/pyarrow-12.0.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 pip install /apps/dat/cv/xsl/weights/scipy-1.11.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+pip install /apps/dat/cv/xsl/weights/matplotlib-3.7.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 cd /home/diffusers/
 pip install -v -e .

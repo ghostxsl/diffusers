@@ -1,14 +1,18 @@
 import numbers
 from collections.abc import Sequence
+import numpy as np
+from PIL import Image
 
 import torch
 import torchvision.transforms.functional as F
 from torchvision.utils import _log_api_usage_once
+from .utils import draw_bodypose, draw_handpose
 
 
 __all__ = [
-    'Resize', 'CenterCrop', 'RandomCrop', 'RandomHorizontalFlip',
-    'ToTensor', 'Normalize',
+    'Resize', 'CenterCrop', 'RandomCrop',
+    'RandomHorizontalFlip', 'RandomVerticalFlip',
+    'ToTensor', 'Normalize', 'DrawPose',
 ]
 
 
@@ -338,7 +342,43 @@ class RandomHorizontalFlip(torch.nn.Module):
         return f"{self.__class__.__name__}(p={self.p})"
 
 
-class ToTensor:
+class RandomVerticalFlip(torch.nn.Module):
+    """Vertically flip the given image randomly with a given probability.
+    If the image is torch Tensor, it is expected
+    to have [..., H, W] shape, where ... means an arbitrary number of leading
+    dimensions
+
+    Args:
+        p (float): probability of the image being flipped. Default value is 0.5
+    """
+
+    def __init__(self, p=0.5):
+        super().__init__()
+        _log_api_usage_once(self)
+        self.p = p
+
+    def forward(self, img):
+        """
+        Args:
+            img (PIL Image or Tensor): Image to be flipped.
+
+        Returns:
+            PIL Image or Tensor: Randomly flipped image.
+        """
+        if torch.rand(1) < self.p:
+            if isinstance(img, dict):
+                for k, v in img.items():
+                    if 'image' in k:
+                        img[k] = F.vflip(v)
+            else:
+                img = F.vflip(img)
+        return img
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(p={self.p})"
+
+
+class ToTensor(object):
     """Convert a PIL Image or ndarray to tensor and scale the values accordingly.
 
     This transform does not support torchscript.
@@ -423,3 +463,39 @@ class Normalize(torch.nn.Module):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(mean={self.mean}, std={self.std})"
+
+
+class DrawPose(object):
+    def __init__(self,
+                 hand=True,
+                 face=True,
+                 body_kpt_thr=0.3,
+                 hand_kpt_thr=0.3,
+                 face_kpt_thr=0.3,):
+        _log_api_usage_once(self)
+        self.hand = hand
+        self.face = face
+        self.body_kpt_thr = body_kpt_thr
+        self.hand_kpt_thr = hand_kpt_thr
+        self.face_kpt_thr = face_kpt_thr
+
+    def __call__(self, data):
+        assert isinstance(data, dict)
+
+        if 'condition' in data and 'image' in data:
+            _, height, width = F.get_dimensions(data['image'])
+            canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
+            kpts = data['condition']['body']['keypoints'][..., :2] * np.array([width, height])
+            kpt_valid = data['condition']['body']['keypoints'][..., 2] > self.body_kpt_thr
+            canvas = draw_bodypose(canvas, kpts, kpt_valid)
+            if self.hand and data['condition']['hand'] is not None:
+                kpts = data['condition']['hand']['keypoints'][..., :2] * np.array([width, height])
+                kpt_valid = data['condition']['hand']['keypoints'][..., 2] > self.hand_kpt_thr
+                canvas = draw_handpose(canvas, kpts, kpt_valid)
+            data['condition_image'] = Image.fromarray(canvas)
+        else:
+            raise Exception(f'Wrong type: {type(data)}')
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"

@@ -517,6 +517,11 @@ def parse_args():
             "num_workers>0 default is `2`)."
         ),
     )
+    parser.add_argument(
+        "--condition_image",
+        action="store_true",
+        help=("Whether to use images for condition"),
+    )
 
     args = parser.parse_args()
 
@@ -704,6 +709,7 @@ def main(args):
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
+        condition_image=args.condition_image,
         img_size=args.resolution,
         center_crop=args.center_crop,
         random_flip=args.random_flip,

@@ -18,7 +18,7 @@ model, vis_processors, _ = load_model_and_preprocess(
 
 f = open(out_file, "a", encoding="utf-8", newline="")
 writer = csv.writer(f)
-# writer.writerow(['image', 'text'])
+# writer.writerow(['file_name', 'text'])
 
 num_no_caption = 0
 img_list = os.listdir(img_dir)

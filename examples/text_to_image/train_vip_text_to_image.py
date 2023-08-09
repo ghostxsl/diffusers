@@ -236,9 +236,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--random_flip",
+        "--random_hflip",
         action="store_true",
         help="whether to randomly flip images horizontally",
+    )
+    parser.add_argument(
+        "--random_vflip",
+        action="store_true",
+        help="whether to randomly flip images vertically",
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
@@ -583,7 +588,8 @@ def main(args):
         tokenizer=tokenizer,
         img_size=args.resolution,
         center_crop=args.center_crop,
-        random_flip=args.random_flip,
+        random_hflip=args.random_hflip,
+        random_vflip=args.random_vflip,
         drop_text=args.drop_text,
         keep_in_memory=args.keep_in_memory,
     )
