@@ -19,10 +19,10 @@ import random
 from tqdm.auto import tqdm
 from PIL import Image, ImageOps
 import torch
-import torchvision
 from torchvision import transforms as tv_transforms
 
 from .transforms import *
+from .utils import *
 
 
 __all__ = [
@@ -43,7 +43,8 @@ class T2IDataset(torch.utils.data.Dataset):
         tokenizer,
         img_size=512,
         center_crop=False,
-        random_flip=False,
+        random_hflip=False,
+        random_vflip=False,
         drop_text=0.1,
         keep_in_memory=False
     ):
@@ -55,8 +56,6 @@ class T2IDataset(torch.utils.data.Dataset):
         self.dataset_csv = dataset_csv
         self.train_data_dir = train_data_dir
         self.tokenizer = tokenizer
-        self.center_crop = center_crop
-        self.random_flip = random_flip
         self.drop_text = drop_text
         self.keep_in_memory = keep_in_memory
         self.empty_text_inputs = tokenizer(
@@ -68,19 +67,21 @@ class T2IDataset(torch.utils.data.Dataset):
         self.image_list = []
         if keep_in_memory:
             for name, caption in tqdm(self.metadata):
-                img = Image.open(os.path.join(train_data_dir, name)).convert("RGB")
-                img = ImageOps.exif_transpose(img)
-                self.image_list.append(img)
+                self.image_list.append(self.load_image(os.path.join(train_data_dir, name)))
 
         self.image_transforms = tv_transforms.Compose(
             [
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
-                CenterCrop(img_size) if self.center_crop else RandomCrop(img_size),
-                RandomHorizontalFlip() if self.random_flip else tv_transforms.Lambda(lambda x: x),
+                CenterCrop(img_size) if center_crop else RandomCrop(img_size),
+                RandomHorizontalFlip() if random_hflip else tv_transforms.Lambda(lambda x: x),
+                RandomVerticalFlip() if random_vflip else tv_transforms.Lambda(lambda x: x),
                 ToTensor(),
                 Normalize([0.5], [0.5]),
             ]
         )
+
+    def load_image(self, path):
+        return ImageOps.exif_transpose(Image.open(path).convert("RGB"))
 
     def __len__(self):
         return self._length
@@ -91,8 +92,7 @@ class T2IDataset(torch.utils.data.Dataset):
             example["pixel_values"] = self.image_transforms(self.image_list[index])
         else:
             name = self.metadata[index][0]
-            img = Image.open(os.path.join(self.train_data_dir, name)).convert("RGB")
-            img = ImageOps.exif_transpose(img)
+            img = self.load_image(os.path.join(self.train_data_dir, name))
             example["pixel_values"] = self.image_transforms(img)
 
         if random.random() < self.drop_text:
@@ -120,6 +120,7 @@ class ControlNetDataset(torch.utils.data.Dataset):
         train_data_dir,
         condition_data_dir,
         tokenizer,
+        condition_image=False,
         img_size=512,
         center_crop=False,
         random_flip=False,
@@ -135,6 +136,7 @@ class ControlNetDataset(torch.utils.data.Dataset):
         self.train_data_dir = train_data_dir
         self.condition_data_dir = condition_data_dir
         self.tokenizer = tokenizer
+        self.condition_image = condition_image
         self.center_crop = center_crop
         self.random_flip = random_flip
         self.drop_text = drop_text
@@ -148,13 +150,18 @@ class ControlNetDataset(torch.utils.data.Dataset):
         self.image_list = []
         if keep_in_memory:
             for name, caption in tqdm(self.metadata):
-                data = {'image': self.load_image(os.path.join(train_data_dir, name)),
-                       'condition_image': self.load_image(os.path.join(condition_data_dir, name))}
+                data = {'image': self.load_image(os.path.join(train_data_dir, name))}
+                if condition_image:
+                    data['condition_image'] = self.load_image(os.path.join(condition_data_dir, name))
+                else:
+                    data['condition'] = pkl_load(
+                        os.path.join(condition_data_dir, os.path.splitext(name)[0] + '_pose.pkl'))
                 self.image_list.append(data)
 
         self.image_transforms = tv_transforms.Compose(
             [
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                DrawPose() if not self.condition_image else tv_transforms.Lambda(lambda x: x),
                 CenterCrop(img_size) if self.center_crop else RandomCrop(img_size),
                 RandomHorizontalFlip() if self.random_flip else tv_transforms.Lambda(lambda x: x),
                 ToTensor(),
@@ -176,8 +183,12 @@ class ControlNetDataset(torch.utils.data.Dataset):
              example["conditioning_pixel_values"] = data['condition_image']
         else:
             name = self.metadata[index][0]
-            data = {'image': self.load_image(os.path.join(self.train_data_dir, name)),
-                    'condition_image': self.load_image(os.path.join(self.condition_data_dir, name))}
+            data = {'image': self.load_image(os.path.join(self.train_data_dir, name))}
+            if self.condition_image:
+                data['condition_image'] = self.load_image(os.path.join(self.condition_data_dir, name))
+            else:
+                data['condition'] = pkl_load(
+                    os.path.join(self.condition_data_dir, os.path.splitext(name)[0] + '_pose.pkl'))
             data = self.image_transforms(data)
             example["pixel_values"] = self.img_normalize(data['image'])
             example["conditioning_pixel_values"] = data['condition_image']
