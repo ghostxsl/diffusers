@@ -1,5 +1,46 @@
+# Copyright (c) wilson.xu. All rights reserved.
+import argparse
 import torch
+import pickle
 from safetensors.torch import load_file, save_file
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Simple example of a converting script.")
+    parser.add_argument(
+        "--convert_type",
+        default='lora',
+        type=str,
+        choices=['lora', 'controlnet'],
+        help="Convert model selection.")
+    parser.add_argument(
+        "--checkpoint_path",
+        default=None,
+        type=str,
+        required=True,
+        help="Path to the checkpoint to convert.")
+    parser.add_argument(
+        "--keys_map_path",
+        default="controlnet_d2w_keys.map",
+        type=str,
+        help="Path to the mapping of keys to convert.")
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=32,
+        help=("The dimension of the LoRA update matrices."),
+    )
+    parser.add_argument("--dump_path", default=None, type=str, required=True, help="Path to the output model.")
+    parser.add_argument("--device", default='cpu', type=str, help="Device to use (e.g. cpu, cuda:0, cuda:1, etc.)")
+
+    args = parser.parse_args()
+    return args
+
+
+def pkl_load(file):
+    with open(file, 'rb') as f:
+        out = pickle.load(f)
+    return out
 
 
 def convert_lora(checkpoint, mode='d2w', lora_rank=32):
@@ -58,61 +99,31 @@ def convert_lora(checkpoint, mode='d2w', lora_rank=32):
     return out
 
 
-device = torch.device("cpu")
-
-diff_lora = torch.load("/xsl/wilson.xu/diffusers/sd-model-finetuned-lora/pytorch_lora_weights.bin", map_location=device)
-diff_temp = {}
-for k, v in diff_lora.items():
-    if k.startswith('text_encoder'):
-        temp = k.split('.')
-        temp_key = '.'.join(temp[:5])
-        if temp_key not in diff_temp:
-            diff_temp[temp_key] = [k]
+def convert_controlnet(checkpoint, map_path, prefix='control_model.'):
+    out = {}
+    d2w_keys = pkl_load(map_path)
+    for k, v in checkpoint.items():
+        webui_key = d2w_keys.get(k, None)
+        if webui_key is not None:
+            webui_key = prefix + webui_key
+            out[webui_key] = v
         else:
-            diff_temp[temp_key].append(k)
-    elif k.startswith('unet'):
-        temp = k.split('.')
-        if temp[1] == 'down_blocks' or temp[1] == 'up_blocks':
-            temp_key = '.'.join(temp[:7])
-        elif temp[1] == 'mid_block':
-            temp_key = '.'.join(temp[:6])
-        else:
-            raise Exception(f'diff no {k}')
+            raise Exception(f"No key: {k} in keys map")
 
-        if temp_key not in diff_temp:
-            diff_temp[temp_key] = [k]
-        else:
-            diff_temp[temp_key].append(k)
-    else:
-        raise Exception(f'diff no {k}')
 
-webui_lora = load_file("/xsl/wilson.xu/weights/handmix101.safetensors", device="cpu")
-webui_temp = {}
-for k, v in webui_lora.items():
-    if k.startswith('lora_te'):
-        temp = k.split('_')
-        temp_key = '_'.join(temp[:7])
-        if temp_key not in webui_temp:
-            webui_temp[temp_key] = [k]
-        else:
-            webui_temp[temp_key].append(k)
-    elif k.startswith('lora_unet'):
-        temp = k.split('_')
-        if temp[2] == 'down' or temp[2] == 'up':
-            temp_key = '_'.join(temp[:7])
-        elif temp[2] == 'mid':
-            temp_key = '_'.join(temp[:6])
-        else:
-            raise Exception(f'webui no {k}')
+def main(args):
+    device = torch.device(args.device)
 
-        if temp_key not in webui_temp:
-            webui_temp[temp_key] = [k]
-        else:
-            webui_temp[temp_key].append(k)
-    else:
-        raise Exception(f'webui no {k}')
+    diffusers_checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    if args.convert_type == "lora":
+        out_safetensors = convert_lora(diffusers_checkpoint, lora_rank=args.lora_rank)
+        save_file(out_safetensors, args.dump_path)
+    elif args.convert_type == "controlnet":
+        out_pth = convert_controlnet(diffusers_checkpoint, args.keys_map_path)
+        torch.save(out_pth, args.dump_path)
 
-w_lora = convert_lora(diff_lora)
-save_file(w_lora, "./d2w_lora.safetensors")
 
-print('Done!')
+if __name__ == "__main__":
+    args = parse_args()
+    main(args)
+    print('Done!')

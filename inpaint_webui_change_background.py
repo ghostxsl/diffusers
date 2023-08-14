@@ -6,7 +6,7 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet i
 from diffusers import VIPStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 
-from diffusers.utils.promt_parser import load_webui_textual_inversion
+from diffusers.utils.prompt_parser import load_webui_textual_inversion
 from diffusers.utils.vip_utils import *
 
 

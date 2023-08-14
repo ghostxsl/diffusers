@@ -11,7 +11,7 @@ from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
 from extensions.HumanParsing.inference.inference_single import HumanParser
 from mmpose.blendpose.openpose import OpenposeDetector
 from mmpose.blendpose import VIPPoseInferencer
-from diffusers.utils.promt_parser import load_webui_textual_inversion
+from diffusers.utils.prompt_parser import load_webui_textual_inversion
 from diffusers.utils.vip_utils import *
 
 
@@ -111,8 +111,7 @@ for i, name in enumerate(names):
     negative_prompt = "ng_deepnegative_v1_75t, high light on body, (badhandv4), (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), glans, extra fingers, fewer fingers, (multi nipples), bad anatomy, bad hands, text, error, missing fingers, missing arms, missing legs, extra digit, fewer digits, cropped, worst quality, jpeg artifacts, signature, watermark, username, bad feet, Multiple people, blurry, poorly drawn hands, poorly drawn face, mutation, deformed, extra limbs, extra arms, extra legs, malformed limbs, fused fingers, too many fingers, long neck, ((cross-eyed)), mutated hands, polar lowres, bad body, bad proportions, gross proportions, wrong feet bottom render, abdominal stretch, briefs, knickers, kecks, thong, fused fingers, bad body,bad proportion body to legs, wrong toes, extra toes, missing toes, weird toes, 2 body, 2 pussy, 2 upper, 2 lower, 2 head, 3 hand, 3 feet, extra long leg, super long leg, mirrored image, mirrored noise, skin spots, acnes, age spot, ((watermark:2)), (white letters:1), illustration, 3d, sepia, painting, cartoon, sketch"
 
     # get pose
-    pose_inferencer.body_kpt_thr=0.3
-    pose_image, pose_res = pose_inferencer(np.array(init_image), hand=True)
+    pose_image, pose_res = pose_inferencer(np.array(init_image))
     pose_image = Image.fromarray(pose_image)
     # get canny
     canny_image = cv2.Canny(np.array(clo_mask), 100, 200)[..., None]
@@ -165,8 +164,7 @@ for i, name in enumerate(names):
         arms_mask = Image.fromarray(arms_mask)
         arms_mask = mask_process(arms_mask, invert_mask=False)
         # get hand pose
-        pose_inferencer.body_kpt_thr=2.0
-        pose_image, pose_res = pose_inferencer(np.array(img), hand=True)
+        pose_image, pose_res = pose_inferencer(np.array(img), body=False)
         pose_image = Image.fromarray(pose_image)
         hand_kpts = pose_res['hand']['keypoints'][..., :2] * np.array(input_size)
         hand_scores = pose_res['hand']['keypoints'][..., 2]
@@ -207,7 +205,7 @@ for i, name in enumerate(names):
                 num_images_per_prompt=batch_size,
                 generator=generator,
                 controlnet_conditioning_scale=1.0,
-                cross_attention_kwargs={"scale": 0.3})
+                cross_attention_kwargs={"scale": 0.4})
             pipe2_list = alpha_composite(pipe2_list, image2_overlay)
             # Paste back according to the mask
             x1, y1, x2, y2 = crop_region

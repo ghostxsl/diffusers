@@ -873,11 +873,12 @@ def main(args):
                 generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
             images = []
-            for _ in range(args.num_validation_images):
+            for i in range(args.num_validation_images):
                 with torch.cuda.amp.autocast():
                     images.append(
                         pipeline(
                             args.validation_prompt, num_inference_steps=30, generator=generator).images[0])
+                images[i].save(os.path.join(args.output_dir, f"validation/final_{i}.png"))
 
     accelerator.end_training()
 
