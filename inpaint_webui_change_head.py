@@ -8,7 +8,7 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscre
 from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
 from mmpose.blendpose.inferencer import VIPPoseInferencer
 
-from diffusers.utils.promt_parser import load_webui_textual_inversion
+from diffusers.utils.prompt_parser import load_webui_textual_inversion
 from diffusers.utils.vip_utils import *
 
 

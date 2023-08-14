@@ -30,13 +30,18 @@ def get_fixed_seed(seed):
 
 
 def load_image(image_path):
-    assert isinstance(image_path, str)
-    image = Image.open(image_path)
+    if isinstance(image_path, str):
+        image = Image.open(image_path)
+    elif isinstance(image_path, Image.Image):
+        image = image_path
+    else:
+        raise ValueError(
+            "Incorrect format used for image. Should be a local path to an image, or a PIL image."
+        )
     image = ImageOps.exif_transpose(image)
     if image.mode == "RGBA":
         # returning an RGB mode image with no transparency
-        img = np.array(image)[..., :3]
-        image = Image.fromarray(img)
+        image = Image.fromarray(np.array(image)[..., :3])
     return image.convert("RGB")
 
 
