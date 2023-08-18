@@ -1,8 +1,8 @@
 import os
 import numpy as np
 from PIL import Image
-from diffusers import ControlNetModel
-from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import MultiControlNetModel
+from diffusers.models import ControlNetModel
+from diffusers.pipelines.controlnet import MultiControlNetModel
 from diffusers import VIPStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 
