@@ -467,7 +467,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         return extra_step_kwargs
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.StableDiffusionImg2ImgPipeline.get_timesteps
-    def get_timesteps(self, num_inference_steps, strength, device):
+    def get_timesteps(self, num_inference_steps, strength):
         # get the original timestep using init_timestep
         init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
 
@@ -708,7 +708,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         mask = mask.resize((width // self.vae_scale_factor, height // self.vae_scale_factor))
         mask = torch.from_numpy(np.array(mask, dtype=np.float32)[None, None,])
         mask = torch.round(mask / 255.0).to(device=device, dtype=dtype)
-        mask = mask.to(device=device, dtype=dtype)
 
         masked_image = masked_image.to(device=device, dtype=dtype)
         masked_image_latents = self._encode_vae_image(masked_image, generator=generator)
@@ -754,6 +753,76 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         image_latents = self.vae.config.scaling_factor * image_latents
 
         return image_latents
+
+    def _check_enhance_params(self, param, nums):
+        if not isinstance(param, (list, tuple)):
+            param = [param,] * nums
+        else:
+            assert len(param) == nums
+        return param
+
+    def _get_enhance_params(self,
+                            image,
+                            num_inference_steps,
+                            enhance,
+                            generator,
+                            **kwargs):
+        # reference: https://github.com/python-pillow/Pillow/blob/main/src/PIL/ImageEnhance.py
+        if isinstance(enhance, str):
+            assert enhance in ['color', 'contrast', 'brightness', 'sharpness'], (
+                "The enhance type can only be one of color, contrast, brightness and sharpness.")
+            enhance = [enhance]
+        elif isinstance(enhance, (list, tuple)):
+            for e_type in enhance:
+                assert e_type in ['color', 'contrast', 'brightness', 'sharpness'], (
+                    "The enhance type can only be one of color, contrast, brightness and sharpness.")
+        else:
+            raise Exception(f"Error enhance type: {type(enhance)}.")
+
+        grey_latents = []
+        for e_type in enhance:
+            if e_type == 'color':
+                image = image * torch.tensor([0.299, 0.587, 0.114])[:, None, None].to(image)
+                image = image.sum(1, keepdim=True).tile([1, 3, 1, 1])
+                grey_latents.append(self._encode_vae_image(image, generator))
+            elif e_type == 'contrast':
+                grey_latents.append(self._encode_vae_image(
+                    torch.full_like(image, image.mean()), generator))
+            elif e_type == 'brightness':
+                grey_latents.append(self._encode_vae_image(
+                    torch.zeros_like(image), generator))
+            elif e_type == 'sharpness':
+                w = torch.tensor([1, 1, 1, 1, 5, 1, 1, 1, 1]).reshape([3, 3]) / 13.
+                w = w[None, None].tile([3, 1, 1, 1]).to(image)
+                image = F.conv2d(image, w, padding='same', groups=3)
+                grey_latents.append(self._encode_vae_image(image, generator))
+
+        enhance_scale = self._check_enhance_params(
+            kwargs.get('enhance_scale', 0.025), len(enhance))
+        exponent = self._check_enhance_params(
+            kwargs.get('enhance_exponent', 0), len(enhance))
+        reverse = self._check_enhance_params(
+            kwargs.get('enhance_reverse', False), len(enhance))
+        start_step = self._check_enhance_params(
+            kwargs.get('enhance_guidance_start', 0.01), len(enhance))
+        start_step = [int(a * num_inference_steps) for a in start_step]
+        end_step = self._check_enhance_params(
+            kwargs.get('enhance_guidance_end', 0.5), len(enhance))
+        end_step = [int(a * num_inference_steps) for a in end_step]
+
+        out_scale = []
+        for s, e, rev, exp_, en_s in zip(start_step, end_step, reverse, exponent, enhance_scale):
+            single_scale = []
+            for i in range(num_inference_steps):
+                if i < s or i >= e:
+                    single_scale.append(-1.0)
+                    continue
+                scale = (i - s) / (e - s)
+                if rev:
+                    scale = 1 - scale
+                single_scale.append(scale ** exp_ * en_s + 1)
+            out_scale.append(single_scale)
+        return grey_latents, out_scale
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
@@ -982,7 +1051,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps, num_inference_steps = self.get_timesteps(
-            num_inference_steps=num_inference_steps, strength=strength, device=device
+            num_inference_steps=num_inference_steps, strength=strength
         )
         # at which timestep to set the initial noise (n.b. 50% if strength is 0.5)
         latent_timestep = timesteps[:1].repeat(num_images_per_prompt)
@@ -1030,10 +1099,22 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             ]
             controlnet_keep.append(keeps[0] if len(keeps) == 1 else keeps)
 
+        # 7.2 Prepare image enhance parameters
+        enhance = kwargs.pop('enhance', None)
+        if enhance is not None:
+            grey_latents, enhance_scales = self._get_enhance_params(
+                init_image.to(device=device, dtype=prompt_embeds_dtype),
+                num_inference_steps, enhance, generator, **kwargs)
+
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                if enhance is not None:
+                    for grey_latent, enhance_scale in zip(grey_latents, enhance_scales):
+                        if enhance_scale[i] >= 0:
+                            latents = torch.lerp(grey_latent, latents, enhance_scale[i])
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance and is_prompt_batch else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)

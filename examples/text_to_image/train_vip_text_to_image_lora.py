@@ -211,10 +211,20 @@ def parse_args():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
+    )
+    parser.add_argument(
         "--learning_rate",
         type=float,
         default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
+    )
+    parser.add_argument(
+        "--train_text_encoder",
+        action="store_true",
+        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
     )
     parser.add_argument(
         "--lr_text_encoder",
@@ -396,7 +406,7 @@ def main(args):
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
     # TODO (sayakpaul): Remove this check when gradient accumulation with two models is enabled in accelerate.
-    if args.gradient_accumulation_steps > 1 and accelerator.num_processes > 1:
+    if args.train_text_encoder and args.gradient_accumulation_steps > 1 and accelerator.num_processes > 1:
         raise ValueError(
             "Gradient accumulation is not supported when training the text encoder in distributed training. "
             "Please set gradient_accumulation_steps to 1. This feature will be supported in the future."
@@ -472,6 +482,11 @@ def main(args):
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
+    if args.gradient_checkpointing:
+        unet.enable_gradient_checkpointing()
+        if args.train_text_encoder:
+            text_encoder.gradient_checkpointing_enable()
+
     # now we will add new LoRA weights to the attention layers
     # It's important to realize here how many attention weights will be added and of which sizes
     # The sizes of the attention layers consist only of two different variables:
@@ -509,9 +524,10 @@ def main(args):
     unet.set_attn_processor(unet_lora_attn_procs)
     # The text encoder comes from 🤗 transformers, so we cannot directly modify it.
     # So, instead, we monkey-patch the forward calls of its attention-blocks.
-    # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
-    text_lora_parameters = LoraLoaderMixin._modify_text_encoder(
-        text_encoder, dtype=torch.float32, rank=args.lora_rank)
+    if args.train_text_encoder:
+        # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
+        text_lora_parameters = LoraLoaderMixin._modify_text_encoder(
+            text_encoder, dtype=torch.float32, rank=args.lora_rank)
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
@@ -583,9 +599,11 @@ def main(args):
     else:
         optimizer_cls = torch.optim.AdamW
 
+    params_to_optimize = [{"params": unet_lora_parameters},
+                          {"params": text_lora_parameters, "lr": args.lr_text_encoder}] \
+        if args.train_text_encoder else unet_lora_parameters
     optimizer = optimizer_cls(
-        [{"params": unet_lora_parameters},
-         {"params": text_lora_parameters, "lr": args.lr_text_encoder}],
+        params_to_optimize,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -631,9 +649,14 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler
-    )
+    if args.train_text_encoder:
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        )
+    else:
+        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, train_dataloader, lr_scheduler
+        )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -693,7 +716,8 @@ def main(args):
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
-        text_encoder.train()
+        if args.train_text_encoder:
+            text_encoder.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             # Skip steps until we reach the resumed step
@@ -767,7 +791,11 @@ def main(args):
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = itertools.chain(unet_lora_parameters, text_lora_parameters)
+                    params_to_clip = (
+                        itertools.chain(unet_lora_parameters, text_lora_parameters)
+                        if args.train_text_encoder
+                        else unet_lora_parameters
+                    )
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -867,9 +895,12 @@ def main(args):
         unet = unet.to(torch.float32)
         unet_lora_layers = unet_attn_processors_state_dict(unet)
 
-        text_encoder = accelerator.unwrap_model(text_encoder)
-        text_encoder = text_encoder.to(torch.float32)
-        text_encoder_lora_layers = text_encoder_lora_state_dict(text_encoder)
+        if text_encoder is not None and args.train_text_encoder:
+            text_encoder = accelerator.unwrap_model(text_encoder)
+            text_encoder = text_encoder.to(torch.float32)
+            text_encoder_lora_layers = text_encoder_lora_state_dict(text_encoder)
+        else:
+            text_encoder_lora_layers = None
 
         LoraLoaderMixin.save_lora_weights(
             save_directory=args.output_dir,
