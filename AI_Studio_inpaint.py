@@ -70,11 +70,9 @@ input_size = (1024, 1024)
 pose_path = f"/xsl/wilson.xu/weights/control_v11p_sd15_openpose"
 canny_path = f"/xsl/wilson.xu/weights/control_v11p_sd15_canny"
 depth_path = f"/xsl/wilson.xu/weights/control_sd15_depth"
-light_path = "/xsl/wilson.xu/weights/lightingBasedPicture_v10"
 pose_model = ControlNetModel.from_pretrained(pose_path, torch_dtype=dtype).to(device)
 canny_model = ControlNetModel.from_pretrained(canny_path, torch_dtype=dtype).to(device)
 depth_model = ControlNetModel.from_pretrained(depth_path, torch_dtype=dtype).to(device)
-light_model = ControlNetModel.from_pretrained(light_path, torch_dtype=dtype).to(device)
 
 # set other models
 # https://github.com/ghostxsl/mmpose
@@ -404,87 +402,138 @@ class FaceInpainter():
         return res[0]
 
 
+scene_config = {
+    "art_gallery": {
+        "prompt": "(bokeh:0.8),liminalspaces, An empty art gallery, a silent tribute to artistic expression, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['color', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.025, 0.005]},
+    "cafe": {
+        "prompt": "((standing on the clear floor)), coffee cup on table, dining table, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['color', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.01, 0.005]},
+    "home": {
+        "prompt": "((standing on the clear floor)), window, photorealistic((living room:1.4)), (exquisite decoration),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "stand on the sofa, 2 sofa, ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['color', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.01, 0.005]},
+    "office": {
+        "prompt": "(simple background), (stand on the floor), (clear white Minimalism office:1.4),clear window background, indoors, city landscape, computer,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "((stand on the sofa)),((stand on the table)), ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['color', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.01, 0.005]},
+    "office_building": {
+        "prompt": "bokeh,outdoor, Simple architecture,Minimalist architecture, [glass exterior wall], clear floor, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['color', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.01, 0.005]},
+    "park": {
+        "prompt": "photorealistic (garden background:1.4), Standing on the ground,scenery, tree, outdoors, grass, nature, road, forest, path,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "((stand on water)), ((the waves)), ((cloak)), mountains, ((reefs)), ((backlight)), ((light above the head)), stand on the table, high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['sharpness', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.025, 0.005]},
+    "seaside": {
+        "prompt": "(beautiful beach background:1.4), blue sky, ocean and beach, ((standing on beach)),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['sharpness', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.015, 0.003]},
+    "street_view": {
+        "prompt": "photorealistic (street:1.5),(streetscenervy), road, path, cleaning, white, (Perspective), telephotolens,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": ['sharpness', 'contrast'],
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.025, 0.005]},
+    "studio": {
+        "prompt": "photorealistic (clear grey background:1.4),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": None,
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.003]},
+    "wall": {
+        "prompt": "bokeh,clear background,next to the  wall,physically-based rendering, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
+        "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
+        "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4,
+        "enhance": None,
+        "enhance_guidance_start": 0.1,
+        "enhance_guidance_end": 0.5,
+        "enhance_scale": [0.003]},
+}
+
+
 # 换背景
 class BgInpainter():
     def __init__(self, mote_key, style_key):
-        self.scene_config = {
-            "studio": {
-                "prompt": "photorealistic (clear grey background:1.4),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "home": {
-                "prompt": "((standing on the clear floor)), window, photorealistic((living room:1.4)), (exquisite decoration),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "stand on the sofa, 2 sofa, ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "cafe": {
-                "prompt": "((standing on the clear floor)), coffee cup on table, dining table, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "office": {
-                "prompt": "(simple background), (stand on the floor), (clear white Minimalism office:1.4),clear window background, indoors, city landscape, computer,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "((stand on the sofa)),((stand on the table)), ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "art_gallery": {
-                "prompt": "(bokeh:0.8),liminalspaces, An empty art gallery, a silent tribute to artistic expression, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "park": {
-                "prompt": "photorealistic (garden background:1.4), Standing on the ground,scenery, tree, outdoors, grass, nature, road, forest, path,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "((stand on water)), ((the waves)), ((cloak)), mountains, ((reefs)), ((backlight)), ((light above the head)), stand on the table, high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "seaside": {
-                "prompt": "(beautiful beach background:1.4), blue sky, ocean and beach, ((standing on beach)),beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "office_building": {
-                "prompt": "bokeh,outdoor, Simple architecture,Minimalist architecture, [glass exterior wall], clear floor, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "street_view": {
-                "prompt": "photorealistic (street:1.5),(streetscenervy), road, path, cleaning, white, (Perspective), telephotolens,beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-            "wall": {
-                "prompt": "bokeh,clear background,next to the  wall,physically-based rendering, beautiful light, best quality, masterpiece, ultra highres,  very detailed skin, 4k, photorealistic, masterpiece, very high detailed",
-                "negative_prompt": "ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body,(people),beam,((tilt)),(Complex Background),(Chaotic background),(Sloping background), ((light at background)),((cloak)),((no peoples background)),((backlight)), ((light above the head)), high light on body, highly saturated colors, (((sunset:1.1))), (((sun))),ng_deepnegative_v1_75t , (badhandv4), verybadimagenegative_v1.3, easynegative, EasyNegative, (worst quality:2), (low quality:2), (normal quality:2), lowres, ((monochrome)), ((grayscale)), 2 body, 2 pussy, 2 upper, 2 lower, ((2 head)), ((3 hands)), 3 feet, bad anatomy,((cross-eyed)), bad hands, bad feet, watermark, (moles:2), illustration ,3d, sepia ,painting ,cartoon, sketch, light above the head, stand on the table, high light on body",
-                "steps": 30, "cfgscale": 7, "denoising": 0.5, "mask_blur": 4},
-        }
+        self.scene_config = scene_config
         base_path = "models/mote/CyberRealistic_V3"
         controlnet = MultiControlNetModel([canny_model, depth_model]) #, pose_model, light_model
-        self.pipe_control = VIPStableDiffusionControlNetInpaintPipeline.from_pretrained(base_path,
-                                                                                        controlnet=controlnet,
-                                                                                        torch_dtype=torch.float16).to(
-            'cuda')
+        self.pipe_control = VIPStableDiffusionControlNetInpaintPipeline.from_pretrained(
+            base_path, controlnet=controlnet, torch_dtype=torch.float16).to('cuda')
         self.pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe_control.scheduler.config)
         load_webui_textual_inversion("embedding", self.pipe_control)
         # self.pipe_control.load_lora_weights("sd-model-finetuned-lora", weight_name="pytorch_lora_weights.safetensors")
 
         self.get_depth = MidasDetector()
 
-    def __call__(self, scene_key, mote, ori_mask, seed, **kwargs):
+    def __call__(self, scene_key, mote, ori_mask, seed, hair=True, **kwargs):
         prompt = self.scene_config[scene_key]["prompt"]
         negative_prompt = self.scene_config[scene_key]["negative_prompt"]
 
-        canny_image = cv2.Canny(np.array(ori_mask), 100, 200)[..., None]
+        ori_mask = np.array(ori_mask.convert("L"))
+        canny_image = cv2.Canny(ori_mask, 100, 200)[..., None]
         canny_image = np.tile(canny_image, [1, 1, 3])
         canny_image = Image.fromarray(canny_image)
 
-        label_parsing = human_parsing.inference(mote.copy()).astype('uint8')
-        hair_mask = np.zeros_like(label_parsing)
-        hair_mask[label_parsing == 2] = 255
-        # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        # hair_mask = cv2.erode(hair_mask, kernel, iterations=1)
-        ori_mask = np.array(ori_mask.convert("RGB"))
-        ori_mask[ori_mask < 128] = 0
-        ori_mask[np.tile(hair_mask[..., None], [1,1,3]) == 255] = 0
+        if hair:
+            label_parsing = human_parsing.inference(mote.copy()).astype('uint8')
+            hair_mask = np.zeros_like(label_parsing)
+            hair_mask[label_parsing == 2] = 255
+            ori_mask[ori_mask < 128] = 0
+            ori_mask[hair_mask == 255] = 0
         mask_image = mask_process(Image.fromarray(ori_mask), invert_mask=True)
-        tmp = np.asarray(mask_image.convert("RGB"))
+        # tmp = np.asarray(mask_image.convert("RGB"))
 
         depth = self.get_depth(mote)
         # depth[tmp > 127.5] = 0
         depth_image = Image.fromarray(depth)
 
-        enhance = kwargs.get("enhance", ['color', 'contrast'])
+        enhance = kwargs.get("enhance", None)
+        if enhance is not None and isinstance(enhance, list):
+            enhance = kwargs["enhance"]
+            enhance_guidance_start = kwargs["enhance_guidance_start"]
+            enhance_guidance_end = kwargs["enhance_guidance_end"]
+            enhance_scale = kwargs["enhance_scale"]
+        elif enhance is not None :
+            enhance = self.scene_config[scene_key]["enhance"]
+            enhance_guidance_start = self.scene_config[scene_key]["enhance_guidance_start"]
+            enhance_guidance_end = self.scene_config[scene_key]["enhance_guidance_end"]
+            enhance_scale = self.scene_config[scene_key]["enhance_scale"]
+
         print(f'processing seed = {seed}')
         generator = get_torch_generator(seed, device=device)
         pipe_list, image_overlay = self.pipe_control(
@@ -492,22 +541,23 @@ class BgInpainter():
             negative_prompt=negative_prompt,
             image=mote,
             mask_image=mask_image,
-            control_image=[canny_image, depth_image], #, pose_image, kwargs['light_img']
+            control_image=[canny_image, depth_image],
             height=input_size[1],
             width=input_size[0],
-            strength=0.5,
-            num_inference_steps=self.scene_config[scene_key]['steps'],  #
+            strength=self.scene_config[scene_key]['denoising'],
+            num_inference_steps=self.scene_config[scene_key]['steps'],
             guidance_scale=self.scene_config[scene_key]['cfgscale'],
             num_images_per_prompt=1,
             generator=generator,
-            controlnet_conditioning_scale=[1.0, 0.25],
+            controlnet_conditioning_scale=[1.0, 0.2],
             control_guidance_end=1.0,
 
+            # cross_attention_kwargs={'scale': 0.2},
+
             enhance=enhance,
-            enhance_guidance_start=0.1,
-            enhance_guidance_end=0.5,
-            enhance_scale=[0.025, 0.005],
-            enhance_exponent=0)
+            enhance_guidance_start=enhance_guidance_start,
+            enhance_guidance_end=enhance_guidance_end,
+            enhance_scale=enhance_scale)
         pipe_list = apply_codeformer(face_restored_path, pipe_list)
         pipe_list = alpha_composite(pipe_list, image_overlay)
         return pipe_list[0]
@@ -539,7 +589,7 @@ class Main():
                                 seed=seed, **kwargs)
 
     def change_all(self, scene_key, input_image, input_bg,
-                   kpts, batch_size, use_pih=False, enhance=['color', 'contrast']):
+                   kpts, batch_size, use_pih=False, **kwargs):
         out = []
         # clo_mask = Image.open("/xsl/wilson.xu/xsl/mask.png").convert("RGB").resize(input_size)
         # clo_mask = clotheseg_inferencer(input_image)
@@ -548,7 +598,7 @@ class Main():
         # image_overlay = image_overlay.convert("RGBA")
         # fixed scene background images
         motemask = postApi_zuotang(input_image).convert("L")
-        # motemask = Image.open("mask.png")
+        # motemask = Image.open("mask_bg.png")
         fg_mask = np.asarray(motemask)[..., None].copy()
         fg_mask[fg_mask > 127.5] = 255
         fg_mask[fg_mask <= 127.5] = 0
@@ -568,7 +618,7 @@ class Main():
 
         seed = get_fixed_seed(None)
         for i in range(batch_size):
-            res = self.change_bg(scene_key, img_pih, motemask, seed=seed + i, enhance=enhance)
+            res = self.change_bg(scene_key, img_pih, motemask, seed=seed + i, **kwargs)
             # res = self.change_mote(change_key, res, seed=seed + i)
             out.append(res)
         return img_bg, img_pih, out
@@ -612,7 +662,11 @@ if __name__ == "__main__":
                                                 input_image=input_mote,
                                                 input_bg=input_bg,
                                                 kpts=kpts, batch_size=1,
-                                                enhance=['sharpness', 'contrast'])
+                                                enhance=['sharpness', 'contrast'],
+                                                enhance_guidance_start=0.1,
+                                                enhance_guidance_end=0.5,
+                                                enhance_scale=[0.025, 0.005],
+                                                )
 
             out = np.concatenate((input_mote, res[0]), axis=1)
             Image.fromarray(np.uint8(out)).save(f"{save_dir}/{name}.jpg")
@@ -630,8 +684,10 @@ if __name__ == "__main__":
 
     # for root, dirs, files in os.walk(bg_dir):
     #     for name in files:
-    #         if "seaside" not in root:
+    #         if "studio" not in root:
     #             continue
+    #         # if name != "seaside_full_ (22).jpg":
+    #         #     continue
     #         scence = root.split("/")[-2]
     #         print(f"{scence}: {name}")
     #         bg_img = Image.open(join(root, name)).convert("RGB").resize(input_size)
@@ -656,11 +712,12 @@ if __name__ == "__main__":
     #                                                 input_image=input_mote,
     #                                                 input_bg=input_bg,
     #                                                 kpts=kpts, batch_size=1,
-    #                                                 enhance=['sharpness', 'contrast'])
+    #                                                 enhance=True)
 
     #             out = np.concatenate((input_mote, img_bg, res_1[0], res[0]), axis=1)
     #             os.makedirs(join(save_dir, scence), exist_ok=True)
     #             Image.fromarray(np.uint8(out)).save(f"{save_dir}/{scence}/{name}")
+    #             print(f"save image: {save_dir}/{scence}/{name}")
     #         else:  # 用户上传图不符合要求
     #             flag = pre_det_res[0]
 
