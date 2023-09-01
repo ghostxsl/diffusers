@@ -17,7 +17,7 @@
 
 import inspect
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, MutableSequence
 
 import numpy as np
 import PIL.Image
@@ -755,7 +755,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         return image_latents
 
     def _check_enhance_params(self, param, nums):
-        if not isinstance(param, (list, tuple)):
+        if not isinstance(param, (list, tuple, MutableSequence)):
             param = [param,] * nums
         else:
             assert len(param) == nums
@@ -772,7 +772,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             assert enhance in ['color', 'contrast', 'brightness', 'sharpness'], (
                 "The enhance type can only be one of color, contrast, brightness and sharpness.")
             enhance = [enhance]
-        elif isinstance(enhance, (list, tuple)):
+        elif isinstance(enhance, (list, tuple, MutableSequence)):
             for e_type in enhance:
                 assert e_type in ['color', 'contrast', 'brightness', 'sharpness'], (
                     "The enhance type can only be one of color, contrast, brightness and sharpness.")

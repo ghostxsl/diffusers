@@ -125,7 +125,8 @@ class ControlNetDataset(torch.utils.data.Dataset):
         center_crop=False,
         random_flip=False,
         drop_text=0.1,
-        keep_in_memory=False
+        keep_in_memory=False,
+        data_transform="pose",
     ):
         assert os.path.exists(dataset_csv)
         assert os.path.exists(train_data_dir)
@@ -158,15 +159,26 @@ class ControlNetDataset(torch.utils.data.Dataset):
                         os.path.join(condition_data_dir, os.path.splitext(name)[0] + '_pose.pkl'))
                 self.image_list.append(data)
 
-        self.image_transforms = tv_transforms.Compose(
-            [
-                Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
-                DrawPose() if not self.condition_image else tv_transforms.Lambda(lambda x: x),
-                CenterCrop(img_size) if self.center_crop else RandomCrop(img_size),
-                RandomHorizontalFlip() if self.random_flip else tv_transforms.Lambda(lambda x: x),
-                ToTensor(),
-            ]
-        )
+        if data_transform == "pose":
+            self.image_transforms = tv_transforms.Compose(
+                [
+                    Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                    DrawPose() if not self.condition_image else tv_transforms.Lambda(lambda x: x),
+                    CenterCrop(img_size) if self.center_crop else RandomCrop(img_size),
+                    RandomHorizontalFlip() if self.random_flip else tv_transforms.Lambda(lambda x: x),
+                    ToTensor(),
+                ]
+            )
+        elif data_transform == "color":
+            self.image_transforms = tv_transforms.Compose(
+                [
+                    Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                    CenterCrop(img_size) if self.center_crop else RandomCrop(img_size),
+                    RandomHorizontalFlip() if self.random_flip else tv_transforms.Lambda(lambda x: x),
+                    ColorJitter(0.5, 0.5, 0.5, 0.5),
+                    ToTensor(),
+                ]
+            )
         self.img_normalize = Normalize([0.5], [0.5])
 
     def load_image(self, path):
