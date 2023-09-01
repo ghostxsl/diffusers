@@ -5,12 +5,13 @@ import requests, base64
 import numpy as np
 from io import BytesIO
 import random
+from scipy.interpolate import interp1d
 
 import cv2
 from PIL import Image, ImageEnhance, ImageFilter
 from diffusers.models import ControlNetModel
-from diffusers.pipelines.controlnet import MultiControlNetModel
-from diffusers import VIPStableDiffusionControlNetInpaintPipeline
+from diffusers.pipelines.controlnet.multicontrolnet import MultiControlNetModel
+from diffusers.pipelines.controlnet.vip_pipeline_controlnet_inpaint import VIPStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 
 from diffusers.utils.prompt_parser import load_webui_textual_inversion
@@ -488,26 +489,48 @@ scene_config = {
 
 # 换背景
 class BgInpainter():
-    def __init__(self, mote_key, style_key):
+    def __init__(self, load_lora=False):
         self.scene_config = scene_config
         base_path = "models/mote/CyberRealistic_V3"
-        controlnet = MultiControlNetModel([canny_model, depth_model]) #, pose_model, light_model
+        controlnet = [canny_model, depth_model, pose_model] #, pose_model, light_model
         self.pipe_control = VIPStableDiffusionControlNetInpaintPipeline.from_pretrained(
             base_path, controlnet=controlnet, torch_dtype=torch.float16).to('cuda')
         self.pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe_control.scheduler.config)
         load_webui_textual_inversion("embedding", self.pipe_control)
         # self.pipe_control.load_lora_weights("sd-model-finetuned-lora", weight_name="pytorch_lora_weights.safetensors")
+        if load_lora:
+            for i in range(len(style_config["european_girl"]["european_girl_sweet"]["lora_model_path"])):
+                lora_model_path = style_config["european_girl"]["european_girl_sweet"]["lora_model_path"][i]
+                lora_ratio = style_config["european_girl"]["european_girl_sweet"]["ratio"][i]
+                self.pipe_control = load_lora_weights(self.pipe_control, lora_model_path, lora_ratio, device="cuda",
+                                                    dtype=dtype)
+
 
         self.get_depth = MidasDetector()
 
     def __call__(self, scene_key, mote, ori_mask, seed, hair=True, **kwargs):
+        # mote_config['european_girl']['prompt'] +
         prompt = self.scene_config[scene_key]["prompt"]
         negative_prompt = self.scene_config[scene_key]["negative_prompt"]
 
+        # pose_image = pose_inferencer(np.array(mote), hand=True)
+        # pose_image = Image.fromarray(pose_image)
+
+        # label_parsing = human_parsing.inference(mote.copy()).astype("uint8")
+        # face_mask = np.zeros_like(label_parsing)
+        # face_mask[label_parsing == 10] = 255
+        # face_mask[label_parsing == 13] = 255
+        # face_mask = cv2.dilate(face_mask, np.ones((5, 5), np.uint8), iterations=1)
+
         ori_mask = np.array(ori_mask.convert("L"))
-        canny_image = cv2.Canny(ori_mask, 100, 200)[..., None]
-        canny_image = np.tile(canny_image, [1, 1, 3])
+        fg_mask = cv2.threshold(ori_mask, 127, 1, cv2.THRESH_BINARY)[1]
+        canny_image = cv2.Canny(np.array(mote) * fg_mask[..., None], 100, 200)
+        canny_image = np.tile(canny_image[..., None], [1, 1, 3])
         canny_image = Image.fromarray(canny_image)
+
+        # canny_image = cv2.Canny(ori_mask, 100, 200)
+        # canny_image = np.tile(canny_image[..., None], [1, 1, 3])
+        # canny_image = Image.fromarray(canny_image)
 
         if hair:
             label_parsing = human_parsing.inference(mote.copy()).astype('uint8')
@@ -515,20 +538,27 @@ class BgInpainter():
             hair_mask[label_parsing == 2] = 255
             ori_mask[ori_mask < 128] = 0
             ori_mask[hair_mask == 255] = 0
+        # clo_mask = clotheseg_inferencer(mote)
+        # mask_image = mask_process(clo_mask, invert_mask=True)
+        # tmp = np.array(mask_image.convert("RGB"))
+
         mask_image = mask_process(Image.fromarray(ori_mask), invert_mask=True)
-        # tmp = np.asarray(mask_image.convert("RGB"))
+        tmp = np.asarray(mask_image.convert("RGB"))
 
         depth = self.get_depth(mote)
-        # depth[tmp > 127.5] = 0
+        depth[tmp > 127.5] = 0
         depth_image = Image.fromarray(depth)
 
         enhance = kwargs.get("enhance", None)
+        enhance_guidance_start = kwargs.get("enhance_guidance_start", None)
+        enhance_guidance_end = kwargs.get("enhance_guidance_end", None)
+        enhance_scale = kwargs.get("enhance_scale", None)
         if enhance is not None and isinstance(enhance, list):
             enhance = kwargs["enhance"]
             enhance_guidance_start = kwargs["enhance_guidance_start"]
             enhance_guidance_end = kwargs["enhance_guidance_end"]
             enhance_scale = kwargs["enhance_scale"]
-        elif enhance is not None :
+        elif enhance is not None:
             enhance = self.scene_config[scene_key]["enhance"]
             enhance_guidance_start = self.scene_config[scene_key]["enhance_guidance_start"]
             enhance_guidance_end = self.scene_config[scene_key]["enhance_guidance_end"]
@@ -537,11 +567,11 @@ class BgInpainter():
         print(f'processing seed = {seed}')
         generator = get_torch_generator(seed, device=device)
         pipe_list, image_overlay = self.pipe_control(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            prompt="(black or brown hair: 1.2)" + prompt,
+            negative_prompt=negative_prompt, # "(white hair, green hair, grey hair)" +
             image=mote,
             mask_image=mask_image,
-            control_image=[canny_image, depth_image],
+            control_image=[canny_image, depth_image, depth_image],
             height=input_size[1],
             width=input_size[0],
             strength=self.scene_config[scene_key]['denoising'],
@@ -549,7 +579,7 @@ class BgInpainter():
             guidance_scale=self.scene_config[scene_key]['cfgscale'],
             num_images_per_prompt=1,
             generator=generator,
-            controlnet_conditioning_scale=[1.0, 0.2],
+            controlnet_conditioning_scale=[1.0, 0.2, 0.0],
             control_guidance_end=1.0,
 
             # cross_attention_kwargs={'scale': 0.2},
@@ -564,10 +594,9 @@ class BgInpainter():
 
 
 class Main():
-    def __init__(self):
+    def __init__(self, load_lora=False):
         self.data_preprocess = Preprocesser()
-        self.bg_inpainter = BgInpainter(mote_key="european_girl", style_key="european_girl_sweet")
-        # self.face_inpainter = FaceInpainter(mote_key="european_girl", style_key="european_girl_sweet")
+        self.bg_inpainter = BgInpainter(load_lora=load_lora)
 
     def change_mote(self, change_key, input_image, seed=-1, **kwargs):
         if change_key == "change_head":  # 换头
@@ -624,30 +653,51 @@ class Main():
         return img_bg, img_pih, out
 
 
+def hist_match(fg_img, bg_name, bg_val, bins=list(range(257))):
+    img = np.array(fg_img)
+    L_img = cv2.cvtColor(img, cv2.COLOR_RGB2Lab)[..., 0]
+    hist, bin_edges = np.histogram(L_img, bins=bins, density=True)
+    func = interp1d(bins[:-1], hist, kind='cubic')
+    x = np.linspace(5, 250, num=100)
+    y = func(x)
+    dis = np.linalg.norm(bg_val - y, axis=1)
+    min_name = bg_name[dis.argmin()]
+    return min_name
+
+
 if __name__ == "__main__":
-    pipe = Main()
+    pipe = Main(load_lora=False)
 
     save_dir = f'./output_hair'
     os.makedirs(save_dir, exist_ok=True)
 
 
-    fg_dir = "/xsl/wilson.xu/hair_problem"
-    bg_dir = "/xsl/wilson.xu/bg"
+    fg_dir = "/xsl/wilson.xu/canny_hair_problem"
     fg_list = os.listdir(fg_dir)
+
+    # bg_dir = "/xsl/wilson.xu/bg"
+
+    bg_scene = pkl_load("/xsl/wilson.xu/bg_scene.pkl")
+    bg_hist = pkl_load("/xsl/wilson.xu/bg_hist.pkl")
+    bg_name = list(bg_hist['hist_fit'].keys())
+    bg_val = np.stack(list(bg_hist['hist_fit'].values()))
+    bg_dir = "/xsl/wilson.xu/dataset/tmp_imgs/bg_img"
 
     for i, name in enumerate(fg_list):
         # if "tryon" not in name:
         #     continue
-        # name = "tryon_single_art_gallery_part_ (40).jpg_1_23000505501_2.jpg"
+        # name = "tryon_single_art_gallery_part_ (40).jpg_1_23000505501_2_head.png"
         print(f"{i + 1}/{len(fg_list)}: {name}")
         fg_img = Image.open(join(fg_dir, name)).convert("RGB")
-        bg_name = name.split(".")[0]
-        # save_name = "_".join(name.split(".")[1].split("_")[1:])
-        bg_name = "_".join(bg_name.split("_")[2:])
-        scence = "_".join(bg_name.split("_")[:-2])
-        bg_name = join(bg_dir, scence, bg_name.split("_")[-2], bg_name + ".jpg")
+        min_name = hist_match(fg_img, bg_name, bg_val)
+        bg_img = Image.open(join(bg_dir, min_name)).convert("RGB").resize(input_size)
+        scence = bg_scene[min_name]
 
-        bg_img = Image.open(bg_name).convert("RGB").resize(input_size)
+        # bg_name = name.split(".")[0]
+        # bg_name = "_".join(bg_name.split("_")[2:])
+        # scence = "_".join(bg_name.split("_")[:-2])
+        # bg_name = join(bg_dir, scence, bg_name.split("_")[-2], bg_name + ".jpg")
+        # bg_img = Image.open(bg_name).convert("RGB").resize(input_size)
         bg_lst = [bg_img, bg_img]
 
         pre_det_res = pipe.data_preprocess(mote=fg_img, bg_lst=bg_lst, is_seedfolder=True)
@@ -681,65 +731,74 @@ if __name__ == "__main__":
 
     # fg_img = Image.open("/xsl/wilson.xu/dataset/tmp_imgs/fg_img/45505b41ad30108d38e753e40df555bf.jpg").convert("RGB")
     # bg_dir = "/xsl/wilson.xu/bg"
+    # img_dir = "/xsl/wilson.xu/test_0828"
+    # bg_list = os.listdir(img_dir)
 
-    # for root, dirs, files in os.walk(bg_dir):
-    #     for name in files:
-    #         if "studio" not in root:
-    #             continue
-    #         # if name != "seaside_full_ (22).jpg":
-    #         #     continue
-    #         scence = root.split("/")[-2]
-    #         print(f"{scence}: {name}")
-    #         bg_img = Image.open(join(root, name)).convert("RGB").resize(input_size)
-    #         bg_lst = [bg_img, bg_img]  # 除了换模特任务，这里必须有输入
+    # # with open("/xsl/wilson.xu/bg_list.txt", "r") as f:
+    # #     bg_list = f.readlines()
 
-    #         pre_det_res = pipe.data_preprocess(mote=fg_img, bg_lst=bg_lst, is_seedfolder=True)
-    #         if len(pre_det_res) > 1:  # 用户上传图符合要求
-    #             if len(bg_lst) > 0:
-    #                 flag, input_images, body_cls, kpts = pre_det_res
-    #                 input_mote, input_bg = input_images
-    #             else:
-    #                 flag, input_mote = pre_det_res
+    # # for root, dirs, files in os.walk(bg_dir):
+    #     # for name in files:
+    # for i, name in enumerate(bg_list):
+    #     name = name.strip()
+    #     # if "studio" not in root:
+    #     #     continue
+    #     # if name != "seaside_full_ (22).jpg":
+    #     #     continue
+    #     temp = name.split("_")
+    #     scence = "_".join(temp[:-2])
+    #     print(f"{scence}: {name}")
+    #     bg_img = Image.open(join(bg_dir, scence, temp[-2], name)).convert("RGB").resize(input_size)
+    #     bg_lst = [bg_img, bg_img]  # 除了换模特任务，这里必须有输入
 
-    #             # Step2. 选择各种功能执行
-    #             img_bg, img_pih, res_1 = pipe.change_all(scene_key=scence,
-    #                                                 input_image=input_mote,
-    #                                                 input_bg=input_bg,
-    #                                                 kpts=kpts, batch_size=1,
-    #                                                 enhance=None)
+    #     pre_det_res = pipe.data_preprocess(mote=fg_img, bg_lst=bg_lst, is_seedfolder=True)
+    #     if len(pre_det_res) > 1:  # 用户上传图符合要求
+    #         if len(bg_lst) > 0:
+    #             flag, input_images, body_cls, kpts = pre_det_res
+    #             input_mote, input_bg = input_images
+    #         else:
+    #             flag, input_mote = pre_det_res
 
-    #             img_bg, img_pih, res = pipe.change_all(scene_key=scence,
-    #                                                 input_image=input_mote,
-    #                                                 input_bg=input_bg,
-    #                                                 kpts=kpts, batch_size=1,
-    #                                                 enhance=True)
+    #         # Step2. 选择各种功能执行
+    #         # img_bg, _, res0 = pipe.change_all(scene_key=scence,
+    #         #                                     input_image=input_mote,
+    #         #                                     input_bg=input_bg,
+    #         #                                     kpts=kpts, batch_size=1,
+    #         #                                     enhance=None)
 
-    #             out = np.concatenate((input_mote, img_bg, res_1[0], res[0]), axis=1)
-    #             os.makedirs(join(save_dir, scence), exist_ok=True)
-    #             Image.fromarray(np.uint8(out)).save(f"{save_dir}/{scence}/{name}")
-    #             print(f"save image: {save_dir}/{scence}/{name}")
-    #         else:  # 用户上传图不符合要求
-    #             flag = pre_det_res[0]
+    #         img_bg, _, res1 = pipe.change_all(scene_key=scence,
+    #                                             input_image=input_mote,
+    #                                             input_bg=input_bg,
+    #                                             kpts=kpts, batch_size=1,
+    #                                             enhance=True)
 
-
+    #         src_img = Image.open(join(img_dir, name))
+    #         out = np.concatenate((src_img, res1[0]), axis=1)
+    #         # os.makedirs(join(save_dir, scence), exist_ok=True)
+    #         # res1[0].save(f"{save_dir}/{name}")
+    #         Image.fromarray(np.uint8(out)).save(f"{save_dir}/{name}")
+    #         print(f"save image: {save_dir}/{name}")
+    #     else:  # 用户上传图不符合要求
+    #         flag = pre_det_res[0]
 
 
 
 
 
     # bg_scene = pkl_load("/xsl/wilson.xu/bg_scene.pkl")
-    # fg_dict = pkl_load("/xsl/wilson.xu/fg_match.pkl")
-    # fg_dir = "/xsl/wilson.xu/dataset/tmp_imgs/fg_img"
+    # bg_hist = pkl_load("/xsl/wilson.xu/bg_hist.pkl")
+    # bg_name = list(bg_hist['hist_fit'].keys())
+    # bg_val = np.stack(list(bg_hist['hist_fit'].values()))
+    # fg_dir = "/xsl/wilson.xu/bernshaw_test"
     # bg_dir = "/xsl/wilson.xu/dataset/tmp_imgs/bg_img"
 
-    # for i, (k, v) in enumerate(fg_dict.items()):
-    #     print(f"{i + 1}/{len(fg_dict)}: {k}")
-    #     # k = "be69ce57ea7804d7ddc60ebc62f3dba5.jpg"
-    #     # v = fg_dict[k]
-    #     # fg_img = Image.open(os.path.join(fg_dir, k)).convert("RGB")
-    #     # bg_img = Image.open(os.path.join(bg_dir, v['bg_name'])).convert("RGB")
-    #     fg_img = Image.open("/xsl/wilson.xu/1.jpg").convert("RGB")
-    #     bg_img = Image.open("/xsl/wilson.xu/1.jpg").convert("RGB")
+    # fg_list = os.listdir(fg_dir)
+
+    # for i, name in enumerate(fg_list):
+    #     print(f"{i + 1}/{len(fg_list)}: {name}")
+    #     fg_img = Image.open(join(fg_dir, name)).convert("RGB")
+    #     min_name = hist_match(fg_img, bg_name, bg_val)
+    #     bg_img = Image.open(join(bg_dir, min_name)).convert("RGB").resize(input_size)
     #     # bg_img = Image.open("/xsl/wilson.xu/bg/seaside/full/seaside_full_ (4).jpg").convert("RGB")
     #     # bg_img = Image.open("/xsl/wilson.xu/bg/street_view/full/street_view_full_ (3).jpg").convert("RGB")
     #     # bg_img = Image.open("/xsl/wilson.xu/dataset/tmp_imgs/bg_img/911e1f4e7d424303e00131ebc3ee8554.jpg").convert("RGB")
@@ -753,22 +812,16 @@ if __name__ == "__main__":
     #         else:
     #             flag, input_mote = pre_det_res
 
-    #         # Step2. 选择各种功能执行
-    #         res = list()
-    #         if key == "change_mote":
-    #             res = pipe.change_mote(change_key="change_face", input_image=input_mote, batch_size=4)
-    #         elif key == "change_bg":
-    #             res = pipe.change_bg(input_image=[input_mote], input_bg=input_bg, kpts=kpts, batch_size=4)
-    #         elif key == "change_all":
-    #             img_bg, img_pih, res = pipe.change_all(scene_key="home", #bg_scene[v['bg_name']],
-    #                                                    input_image=input_mote,
-    #                                                    input_bg=input_bg,
-    #                                                 #    enhance=None,
-    #                                                    kpts=kpts, batch_size=2)
+    #         img_bg, img_pih, res = pipe.change_all(scene_key=bg_scene[min_name],
+    #                                                 input_image=input_mote,
+    #                                                 input_bg=input_bg,
+    #                                                 kpts=kpts,
+    #                                                 batch_size=2,
+    #                                                 enhance=True)
 
     #         out = np.concatenate((input_mote, img_bg), axis=1)
     #         for j, final_res in enumerate(res):
     #             out = np.concatenate((out, final_res), axis=1)
-    #         Image.fromarray(np.uint8(out)).save(f"{save_dir}/{key}_{k.replace('.png', '.jpg')}")
+    #         Image.fromarray(np.uint8(out)).save(f"{save_dir}/{name}")
     #     else:  # 用户上传图不符合要求
     #         flag = pre_det_res[0]
