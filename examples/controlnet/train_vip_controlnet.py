@@ -522,6 +522,12 @@ def parse_args():
         action="store_true",
         help=("Whether to use images for condition"),
     )
+    parser.add_argument(
+        "--data_transform",
+        type=str,
+        default="pose",
+        help="The data_transform type.",
+    )
 
     args = parser.parse_args()
 
@@ -715,6 +721,7 @@ def main(args):
         random_flip=args.random_flip,
         drop_text=args.drop_text,
         keep_in_memory=args.keep_in_memory,
+        data_transform=args.data_transform,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
