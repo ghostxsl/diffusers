@@ -16,10 +16,9 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscre
 
 from diffusers.utils.prompt_parser import load_webui_textual_inversion
 from diffusers.utils.vip_utils import *
-from diffusers.vip_extensions import ClothSeg
 
 from mmpose.blendpose.inferencer import VIPPoseInferencer
-from mmpose.blendpose.utils import pkl_load
+from mmpose.blendpose.utils import pkl_load, ClothSeg
 from extensions.CodeFormer.inference_codeformer_re import apply_codeformer
 from extensions.HumanParsing.inference.inference_single import HumanParser
 from extensions.midas import MidasDetector
