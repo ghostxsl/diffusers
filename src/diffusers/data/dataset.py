@@ -45,6 +45,7 @@ class T2IDataset(torch.utils.data.Dataset):
         center_crop=False,
         random_hflip=False,
         random_vflip=False,
+        face_crop=False,
         drop_text=0.1,
         keep_in_memory=False
     ):
@@ -67,10 +68,14 @@ class T2IDataset(torch.utils.data.Dataset):
         self.image_list = []
         if keep_in_memory:
             for name, caption in tqdm(self.metadata):
-                self.image_list.append(self.load_image(os.path.join(train_data_dir, name)))
+                img = self.load_image(os.path.join(train_data_dir, name))
+                if face_crop:
+                    img = FaceCrop()(img)
+                self.image_list.append(img)
 
         self.image_transforms = tv_transforms.Compose(
             [
+                FaceCrop() if face_crop and not keep_in_memory else tv_transforms.Lambda(lambda x: x),
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
                 CenterCrop(img_size) if center_crop else RandomCrop(img_size),
                 RandomHorizontalFlip() if random_hflip else tv_transforms.Lambda(lambda x: x),

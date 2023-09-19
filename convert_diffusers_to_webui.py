@@ -20,6 +20,11 @@ def parse_args():
         required=True,
         help="Path to the checkpoint to convert.")
     parser.add_argument(
+        "--from_torch",
+        action="store_true",
+        help="If `--checkpoint_path` is in `safetensors` format, load checkpoint with safetensors instead of PyTorch.",
+    )
+    parser.add_argument(
         "--keys_map_path",
         default="controlnet_d2w_keys.map",
         type=str,
@@ -114,7 +119,11 @@ def convert_controlnet(checkpoint, map_path, prefix='control_model.'):
 def main(args):
     device = torch.device(args.device)
 
-    diffusers_checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    if args.from_torch:
+        diffusers_checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    else:
+        diffusers_checkpoint = load_file(args.checkpoint_path, device=args.device)
+
     if args.convert_type == "lora":
         out_safetensors = convert_lora(diffusers_checkpoint, lora_rank=args.lora_rank)
         save_file(out_safetensors, args.dump_path)
