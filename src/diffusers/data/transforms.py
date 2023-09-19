@@ -7,13 +7,14 @@ import torch
 import torchvision.transforms.functional as F
 from torchvision.utils import _log_api_usage_once
 from .utils import draw_bodypose, draw_handpose
+from diffusers.utils.vip_utils import mediapipe_face_detection, get_crop_region
 
 
 __all__ = [
     'Resize', 'CenterCrop', 'RandomCrop',
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
-    'ColorJitter',
+    'ColorJitter', 'FaceCrop',
 ]
 
 
@@ -654,3 +655,21 @@ class ColorJitter(torch.nn.Module):
             f", hue={self.hue})"
         )
         return s
+
+
+class FaceCrop(object):
+    def __init__(self, padding=32):
+        _log_api_usage_once(self)
+        self.padding = padding
+
+    def get_params(self, img):
+        bboxes, masks, preview = mediapipe_face_detection(img)
+        x1, y1, x2, y2 = get_crop_region(np.array(masks[0]), pad=self.padding)
+        return [y1, x1, y2 - y1, x2 - x1]
+
+    def __call__(self, img):
+        crop_region = self.get_params(img)
+        return F.crop(img, *crop_region)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
