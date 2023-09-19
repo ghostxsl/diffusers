@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Dict
 import itertools
 
-import datasets
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -159,12 +158,6 @@ def parse_args():
         default="sd-model-finetuned-lora",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="The directory where the downloaded models and datasets will be stored.",
-    )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
         "--resolution",
@@ -193,6 +186,11 @@ def parse_args():
         "--random_vflip",
         action="store_true",
         help="whether to randomly flip images vertically",
+    )
+    parser.add_argument(
+        "--face_crop",
+        action="store_true",
+        help="whether to use mediapipe for face",
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
@@ -420,11 +418,9 @@ def main(args):
     )
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
         transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
-        datasets.utils.logging.set_verbosity_error()
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
@@ -619,6 +615,7 @@ def main(args):
         center_crop=args.center_crop,
         random_hflip=args.random_hflip,
         random_vflip=args.random_vflip,
+        face_crop=args.face_crop,
         drop_text=args.drop_text,
         keep_in_memory=args.keep_in_memory,
     )

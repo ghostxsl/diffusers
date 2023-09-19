@@ -130,12 +130,6 @@ canny_model = ControlNetModel.from_pretrained(canny_path, torch_dtype=dtype).to(
 depth_model = ControlNetModel.from_pretrained(depth_path, torch_dtype=dtype).to(device)
 
 # set other models
-# det_config = "extensions/mmpose/demo/mmdetection_cfg/rtmdet_l_8xb32-300e_coco.py"
-# det_checkpoint = "models/Extensions/rtmpose_model/rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth"
-# body_config = "extensions/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-l_8xb256-420e_body8-256x192.py"
-# body_checkpoint = "models/Extensions/rtmpose_model/rtmpose-l_simcc-body7_pt-body7_420e-256x192-4dba18fc_20230504.pth"
-# pose_inferencer = VIPPoseInferencer(det_config, det_checkpoint, body_config, body_checkpoint, kpt_thr=0.3,
-#                                     device=device, return_results=True)
 det_config = "/xsl/wilson.xu/mmpose/mmpose/blendpose/configs/rtmdet_l_8xb32-300e_coco.py"
 det_checkpoint = "/xsl/wilson.xu/weights/rtmpose_model/rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth"
 body_config = "/xsl/wilson.xu/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-l_8xb256-420e_body8-256x192.py"
@@ -309,6 +303,8 @@ class HeadInpainter():
         #     lora_ratio = self.style_config[mote_key][style_key]["ratio"][i]
         #     self.pipe_control = load_lora_weights(self.pipe_control, lora_model_path, lora_ratio, device="cuda",
         #                                           dtype=dtype)
+        # self.pipe_control.load_lora_weights("sd-model-finetuned-lora", weight_name="pytorch_lora_weights.safetensors")
+        # self.pipe_control.fuse_lora(lora_scale=1.0)
         self.pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe_control.scheduler.config)
         load_webui_textual_inversion("embedding", self.pipe_control)
 
@@ -330,7 +326,8 @@ class HeadInpainter():
             face_mask[label_parsing == 10] = 255
             face_mask[label_parsing == 13] = 255
             y1 = np.where(np.sum(face_mask, axis=1))[0][0]
-            y1 += 10
+            if y1 > 0:
+                y1 += 10
             mote = np.array(mote)[y1:]
             h = mote.shape[0]
             fill_img = np.full([int(h * 1.3), ori_w, 3], 255, dtype=np.uint8)
@@ -355,12 +352,12 @@ class HeadInpainter():
             strength = 0.9
             mask = np.zeros((input_size[0], input_size[1]), np.uint8)
             mask[:int(pad_height / (h + pad_height) * 1024)] = 255
-            label_parsing = self.HumanParse.inference(mote).astype('uint8')
+            # label_parsing = self.HumanParse.inference(mote).astype('uint8')
             # mask[label_parsing == 2] = 255
-            mask[label_parsing == 10] = 255
-            mask[label_parsing == 13] = 255
-            kernel = np.ones([9, 9], np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            # mask[label_parsing == 10] = 255
+            # mask[label_parsing == 13] = 255
+            # kernel = np.ones([9, 9], np.uint8)
+            # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
             mask_image = mask_process(Image.fromarray(mask), invert_mask=False, blur=4)
         else:
             init_image = load_image(mote)
@@ -374,6 +371,9 @@ class HeadInpainter():
             kernel = np.ones((5, 5), dtype=np.uint8)
             head_mask = np.asarray(mask_process(Image.fromarray(cv2.dilate(head_mask, kernel, 1)), invert_mask=False))
             mask_image = mask_process(Image.fromarray(head_mask), invert_mask=False, blur=4)
+
+            pose_image, dic = pose_inferencer(init_image)
+            pose_image = Image.fromarray(pose_image)
 
         generator = get_torch_generator(self.seed, batch_size, device=device)
 
@@ -556,11 +556,14 @@ class Adetailer():
                                                                                         torch_dtype=dtype).to(device)
         if "random" in style_key:
             style_key = random.choice(list(self.style_config[mote_key]))
-        for i in range(len(self.style_config[mote_key][style_key]["lora_model_path"])):
-            lora_model_path = self.style_config[mote_key][style_key]["lora_model_path"][i]
-            lora_ratio = self.style_config[mote_key][style_key]["ratio"][i]
-            self.pipe_control = load_lora_weights(self.pipe_control, lora_model_path, lora_ratio, device="cuda",
-                                                  dtype=dtype)
+        # for i in range(len(self.style_config[mote_key][style_key]["lora_model_path"])):
+        #     lora_model_path = self.style_config[mote_key][style_key]["lora_model_path"][i]
+        #     lora_ratio = self.style_config[mote_key][style_key]["ratio"][i]
+        #     self.pipe_control = load_lora_weights(self.pipe_control, lora_model_path, lora_ratio, device="cuda",
+        #                                           dtype=dtype)
+        # self.pipe_control.load_lora_weights("sd-model-finetuned-lora", weight_name="pytorch_lora_weights.safetensors")
+        self.pipe_control.load_lora_weights("/xsl/wilson.xu/lora_face", weight_name="progress1.safetensors")
+        self.pipe_control.fuse_lora(lora_scale=1.0)
         self.pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe_control.scheduler.config)
         load_webui_textual_inversion("embedding", self.pipe_control)
 
@@ -597,7 +600,7 @@ class Adetailer():
         else:
             mask = mask_process(masks[0], invert_mask=False)
 
-        crop_region = get_crop_region(np.array(mask), pad=128)
+        crop_region = get_crop_region(np.array(mask), pad=32)
         crop_region = expand_crop_region(crop_region, input_size[1], input_size[0], mask.width, mask.height)
         mask = mask.crop(crop_region)
         img = init_image.crop(crop_region)
@@ -609,14 +612,15 @@ class Adetailer():
             image=img,
             mask_image=mask,
             control_image=[canny_image],
-            height=input_size[1],
-            width=input_size[0],
-            strength=0.2,
+            height=512,
+            width=512,
+            strength=0.1,
             num_inference_steps=30,
-            guidance_scale=6.5,
+            guidance_scale=6,
             num_images_per_prompt=batch_size,
             generator=generator,
-            controlnet_conditioning_scale=0.6,
+            controlnet_conditioning_scale=0.0,
+            enhance='sharpness',
             )  # 控制是否使用canny
         # pipe_list = apply_codeformer(face_restored_path, pipe_list)
         pipe_list = alpha_composite(pipe_list, image_overlay)
@@ -648,7 +652,8 @@ if __name__ == "__main__":
     app.prepare(ctx_id=0, det_size=(640, 640))
     swapper = insightface.model_zoo.get_model('/root/.insightface/models/inswapper_128.onnx')
 
-    dst_img = cv2.imread('/xsl/wilson.xu/vanguard_asian_girl.png')
+    # dst_img = cv2.imread('/xsl/wilson.xu/dataset/face_images/#10_progress0_as_female0_1024x1024/1.jpg')
+    dst_img = cv2.imread('/xsl/wilson.xu/dataset/face_images/#10_progress1_as_female1_1024x1024/17.jpg')
     dst_face = app.get(dst_img)[0]
 
     print(f"init cost {time.time() - start_time}")
@@ -662,6 +667,7 @@ if __name__ == "__main__":
 
         init_img = Image.open(os.path.join(init_image_root, name))
         head_res = head_inpainter(mote=init_img, batch_size=1, key=1)[0]  # key=1即第一次执行
+        head_res = head_inpainter(mote=head_res, batch_size=1, key=2)[0]
 
         print(f"1st inpaint cost {time.time() - start_time}")
         start_time = time.time()
@@ -671,7 +677,7 @@ if __name__ == "__main__":
         res = swapper.get(src_img.copy(), src_face[0], dst_face, paste_back=True)
         res = Image.fromarray(res[..., ::-1])
 
-        face_res = face_inpainter(mote=res, batch_size=4)
+        face_res = face_inpainter(mote=res, batch_size=3)
 
         print(f"Adetailer inpaint cost {time.time() - start_time}")
         final_res = np.concatenate([init_img.resize(input_size), head_res, res], axis=1)
