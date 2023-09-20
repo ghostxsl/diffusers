@@ -349,7 +349,7 @@ class HeadInpainter():
             mote = pad_color(Image.fromarray(mote), 'white')
             init_image = load_image(mote)
 
-            strength = 0.9
+            strength = 0.8
             mask = np.zeros((input_size[0], input_size[1]), np.uint8)
             mask[:int(pad_height / (h + pad_height) * 1024)] = 255
             # label_parsing = self.HumanParse.inference(mote).astype('uint8')
@@ -362,15 +362,15 @@ class HeadInpainter():
         else:
             init_image = load_image(mote)
 
-            strength = 0.4
-            head_mask = np.zeros((input_size[0], input_size[1], 3), np.uint8)
-            label_parsing = self.HumanParse.inference(init_image)
+            strength = 0.5
+            label_parsing = self.HumanParse.inference(init_image).astype('uint8')
+            head_mask = np.zeros_like(label_parsing)
             # label = {0:"background", 1:"hat", 2:"hair", 4:"sunglasses", 10: "neck", 13:"face"}
             for label in [1, 2, 4, 10, 13]:
                 head_mask[label_parsing == label] = 255
-            kernel = np.ones((5, 5), dtype=np.uint8)
-            head_mask = np.asarray(mask_process(Image.fromarray(cv2.dilate(head_mask, kernel, 1)), invert_mask=False))
-            mask_image = mask_process(Image.fromarray(head_mask), invert_mask=False, blur=4)
+            # kernel = np.ones((5, 5), dtype=np.uint8)
+            # head_mask = cv2.dilate(head_mask, kernel, 1)
+            mask_image = mask_process(Image.fromarray(head_mask), invert_mask=False)
 
             pose_image, dic = pose_inferencer(init_image)
             pose_image = Image.fromarray(pose_image)
@@ -385,7 +385,7 @@ class HeadInpainter():
         canny_image = Image.fromarray(canny_image)
 
         pipe_list, image_overlay = self.pipe_control(
-            prompt="Black long straight hair" + self.prompt,
+            prompt=self.prompt,
             negative_prompt=self.negative_prompt,
             image=init_image,
             mask_image=mask_image,
@@ -397,14 +397,9 @@ class HeadInpainter():
             guidance_scale=7,
             num_images_per_prompt=batch_size,
             generator=generator,
-            controlnet_conditioning_scale=1.)
+            controlnet_conditioning_scale=[1., 1.])
         pipe_list = apply_codeformer(face_restored_path, pipe_list)
-        # if key == 2: pipe_list = alpha_composite(pipe_list, image_overlay)  # 第一次重绘可以不贴回原图，避免衔接处会匹配不上
         pipe_list = alpha_composite(pipe_list, image_overlay)
-        # tmp = np.concatenate((tmp, init_image, mask_image.convert("RGB"), pose_image, pipe_list[0]), axis=1)
-        # path = f"/workspace/tynnie01.wang/tryon/results/0830/mid_border"
-        # if not os.path.exists(path): os.mkdir(path)
-        # Image.fromarray(tmp).save(f"{path}/mask_{country}_{gentle}_{style}_{name.replace('.png', '').replace('.jpg', '')}_{key}.jpg")
         return pipe_list
 
 
@@ -562,7 +557,7 @@ class Adetailer():
         #     self.pipe_control = load_lora_weights(self.pipe_control, lora_model_path, lora_ratio, device="cuda",
         #                                           dtype=dtype)
         # self.pipe_control.load_lora_weights("sd-model-finetuned-lora", weight_name="pytorch_lora_weights.safetensors")
-        self.pipe_control.load_lora_weights("/xsl/wilson.xu/lora_face", weight_name="progress1.safetensors")
+        self.pipe_control.load_lora_weights("/xsl/wilson.xu/lora_face", weight_name="progress1_1.safetensors")
         self.pipe_control.fuse_lora(lora_scale=1.0)
         self.pipe_control.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe_control.scheduler.config)
         load_webui_textual_inversion("embedding", self.pipe_control)
@@ -614,12 +609,12 @@ class Adetailer():
             control_image=[canny_image],
             height=512,
             width=512,
-            strength=0.1,
+            strength=0.2,
             num_inference_steps=30,
             guidance_scale=6,
             num_images_per_prompt=batch_size,
             generator=generator,
-            controlnet_conditioning_scale=0.0,
+            controlnet_conditioning_scale=0.,
             enhance='sharpness',
             )  # 控制是否使用canny
         # pipe_list = apply_codeformer(face_restored_path, pipe_list)
@@ -653,6 +648,7 @@ if __name__ == "__main__":
     swapper = insightface.model_zoo.get_model('/root/.insightface/models/inswapper_128.onnx')
 
     # dst_img = cv2.imread('/xsl/wilson.xu/dataset/face_images/#10_progress0_as_female0_1024x1024/1.jpg')
+    # dst_img = cv2.imread('/xsl/wilson.xu/dataset/face_images/#10_progress1_as_female1_1024x1024/17.jpg')
     dst_img = cv2.imread('/xsl/wilson.xu/dataset/face_images/#10_progress1_as_female1_1024x1024/17.jpg')
     dst_face = app.get(dst_img)[0]
 
@@ -667,7 +663,7 @@ if __name__ == "__main__":
 
         init_img = Image.open(os.path.join(init_image_root, name))
         head_res = head_inpainter(mote=init_img, batch_size=1, key=1)[0]  # key=1即第一次执行
-        head_res = head_inpainter(mote=head_res, batch_size=1, key=2)[0]
+        head_res = head_inpainter(mote=head_res, batch_size=1, key=2)[0]  # key=1即第一次执行
 
         print(f"1st inpaint cost {time.time() - start_time}")
         start_time = time.time()
