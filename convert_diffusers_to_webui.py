@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument(
         "--from_torch",
         action="store_true",
-        help="If `--checkpoint_path` is in `safetensors` format, load checkpoint with safetensors instead of PyTorch.",
+        help="If `--checkpoint_path` is in `torch` format, load checkpoint with PyTorch.",
     )
     parser.add_argument(
         "--keys_map_path",
@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--lora_rank",
         type=int,
-        default=32,
+        default=8,
         help=("The dimension of the LoRA update matrices."),
     )
     parser.add_argument("--dump_path", default=None, type=str, required=True, help="Path to the output model.")

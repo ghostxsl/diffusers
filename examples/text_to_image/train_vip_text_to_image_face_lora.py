@@ -41,9 +41,8 @@ from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNe
 from diffusers.loaders import LoraLoaderMixin, text_encoder_lora_state_dict
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.optimization import get_scheduler
-from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.data import T2IDataset, t2i_collate_fn
+from diffusers.data import FaceDataset, t2i_collate_fn
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -169,28 +168,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--center_crop",
-        default=False,
-        action="store_true",
-        help=(
-            "Whether to center crop the input images to the resolution. If not set, the images will be randomly"
-            " cropped. The images will be resized to the resolution first before cropping."
-        ),
-    )
-    parser.add_argument(
         "--random_hflip",
         action="store_true",
         help="whether to randomly flip images horizontally",
     )
     parser.add_argument(
-        "--random_vflip",
-        action="store_true",
-        help="whether to randomly flip images vertically",
+        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument(
-        "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
-    )
-    parser.add_argument("--num_train_epochs", type=int, default=100)
+    parser.add_argument("--num_train_epochs", type=int, default=200)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -211,7 +196,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-4,
+        default=3e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -234,7 +219,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="constant",
+        default="cosine",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
@@ -301,18 +286,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--report_to",
-        type=str,
-        default="tensorboard",
-        help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
-            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
-        ),
-    )
-    parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=5000,
         help=(
             "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
             " training using `--resume_from_checkpoint`."
@@ -340,16 +316,8 @@ def parse_args():
     parser.add_argument(
         "--lora_rank",
         type=int,
-        default=32,
+        default=8,
         help="The dimension of the LoRA update matrices."
-    )
-    parser.add_argument(
-        "--keep_in_memory",
-        default=False,
-        action="store_true",
-        help=(
-            "Whether to load all of data into memory at once."
-        ),
     )
     parser.add_argument(
         "--drop_text",
@@ -388,14 +356,8 @@ def main(args):
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
         project_config=accelerator_project_config,
     )
-    if args.report_to == "wandb":
-        if not is_wandb_available():
-            raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
-        import wandb
-
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
     # TODO (sayakpaul): Remove this check when gradient accumulation with two models is enabled in accelerate.
@@ -602,16 +564,13 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = T2IDataset(
+    train_dataset = FaceDataset(
         dataset_csv=args.dataset_csv,
         train_data_dir=args.train_data_dir,
         tokenizer=tokenizer,
         img_size=args.resolution,
-        center_crop=args.center_crop,
         random_hflip=args.random_hflip,
-        random_vflip=args.random_vflip,
         drop_text=args.drop_text,
-        keep_in_memory=args.keep_in_memory,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
