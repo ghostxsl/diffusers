@@ -5,6 +5,7 @@ import requests, base64
 import numpy as np
 from io import BytesIO
 import random
+import torch
 from scipy.interpolate import interp1d
 
 import cv2
