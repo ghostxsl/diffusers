@@ -644,6 +644,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
     def prepare_latents(
         self,
         image,
+        mask,
         batch_size,
         num_channels_latents,
         height,
@@ -653,6 +654,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         generator,
         timestep=None,
         is_strength_max=True,
+        **kwargs
     ):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
         if isinstance(generator, list) and len(generator) != batch_size:
@@ -669,6 +671,9 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
 
         image = image.to(device=device, dtype=dtype)
         image_latents = self._encode_vae_image(image=image, generator=generator)
+        if kwargs.get('masked_content', 'original') == 'noise':
+            mask = mask[:1]
+            image_latents *= (1 - mask)
 
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         # if strength is 1. then initialise the latents to noise, else initial to image + noise
@@ -1056,23 +1061,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
 
-        # 6. Prepare latent variables
-        num_channels_latents = self.vae.config.latent_channels
-        num_channels_unet = self.unet.config.in_channels
-        latents, noise, image_latents = self.prepare_latents(
-            init_image,
-            num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds_dtype,
-            device,
-            generator,
-            timestep=latent_timestep,
-            is_strength_max=is_strength_max,
-        )
-
-        # 7. Prepare mask latent variables
+        # 6. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
             mask,
             masked_image,
@@ -1083,6 +1072,24 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             device,
             generator,
             do_classifier_free_guidance and is_prompt_batch,
+        )
+
+        # 7. Prepare latent variables
+        num_channels_latents = self.vae.config.latent_channels
+        num_channels_unet = self.unet.config.in_channels
+        latents, noise, image_latents = self.prepare_latents(
+            init_image,
+            mask,
+            num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds_dtype,
+            device,
+            generator,
+            timestep=latent_timestep,
+            is_strength_max=is_strength_max,
+            **kwargs
         )
 
         # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
