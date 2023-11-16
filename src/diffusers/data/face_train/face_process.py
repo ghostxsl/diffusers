@@ -8,7 +8,6 @@ from modelscope.pipelines import pipeline
 from modelscope.utils.constant import Tasks
 
 from diffusers.data.face_train.YOLOv8FaceDet import YOLOv8FaceDet
-from diffusers.utils.vip_utils import mediapipe_face_detection, get_crop_region
 
 
 __all__ = ['FaceProcess', 'resize_img']
@@ -193,12 +192,10 @@ class FaceProcess(object):
                  face_landmark_path="damo/cv_manual_facial-landmark-confidence_flcm",
                  face_rotate=False,
                  size=512,
-                 face_thr=0.855,
-                 padding=16):
+                 face_thr=0.855):
         self.face_rotate = face_rotate
         self.size = size
         self.face_thr = face_thr
-        self.padding = padding
         self.face_detection = YOLOv8FaceDet(yolov8_path)
         self.segmentation_pipeline = pipeline(
             Tasks.image_segmentation,
@@ -209,35 +206,39 @@ class FaceProcess(object):
             face_landmark_path,
             model_revision='v2.5')
 
-    def get_params(self, img):
-        bboxes, masks, preview = mediapipe_face_detection(img)
-        x1, y1, x2, y2 = get_crop_region(np.array(masks[0]), pad=self.padding)
-        return [y1, x1, y2 - y1, x2 - x1]
+    def get_max_bbox(self, bboxes):
+        if len(bboxes) > 0:
+            area = bboxes[:, 2] * bboxes[:, 3]
+            ind = np.argmax(area)
+            x1, y1, w, h = bboxes[ind]
+            return [int(x1), int(y1), int(x1 + w), int(y1 + h)]
+        else:
+            return None
 
     def __call__(self, img):
         if isinstance(img, (Image.Image, np.ndarray)):
             img = np.array(img)
         else:
             raise Exception(f"Unsupported image type: {type(img)}.")
-
-        det_bboxes, det_conf, det_classid, landmarks = self.face_detection(img)
-        if len(det_bboxes) != 1:
+        # 人脸检测
+        det_bboxes = self.face_detection(img)[0]
+        bbox = self.get_max_bbox(det_bboxes)
+        if bbox is None:
+            print(f"No face detected...")
             return None
 
         # 高分辨率图像为了保真，先将人脸区域裁剪出来
-        bbox = det_bboxes[0]
-        bbox[2] = bbox[0] + bbox[2]
-        bbox[3] = bbox[1] + bbox[3]
         img = crop_image_from_face_bbox(img, bbox)
-        det_bboxes, det_conf, det_classid, landmarks = self.face_detection(img)
 
         if self.face_rotate:
             # 人脸转正
+            _, _, _, landmarks = self.face_detection(img)
             img = face_rotate(img, landmarks[0, :, :2])
             det_bboxes, det_conf, det_classid, landmarks = self.face_detection(img)
-            bbox = det_bboxes[0]
-            bbox[2] = bbox[0] + bbox[2]
-            bbox[3] = bbox[1] + bbox[3]
+            bbox = self.get_max_bbox(det_bboxes)
+            if bbox is None:
+                print(f"After rotate, no face detected...")
+                return None
             img = crop_image_from_face_bbox(img, bbox)
 
         # human parsing

@@ -5,7 +5,7 @@ from PIL import Image
 
 
 class YOLOv8FaceDet(object):
-    def __init__(self, model_path='yolov8n-face.onnx', conf_thres=0.45, iou_thres=0.5):
+    def __init__(self, model_path='yolov8n-face.onnx', conf_thres=0.15, iou_thres=0.5):
         self.conf_threshold = conf_thres
         self.iou_threshold = iou_thres
         # Initialize model
