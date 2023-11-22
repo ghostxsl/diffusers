@@ -49,7 +49,10 @@ def load_image(image_path):
     if image.mode == "RGBA":
         # returning an RGB mode image with no transparency
         image = Image.fromarray(np.array(image)[..., :3])
-    return image.convert("RGB")
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+
+    return image
 
 
 def mask_process(mask, invert_mask=True, blur=4):
