@@ -328,7 +328,7 @@ class ConDepthDataset(torch.utils.data.Dataset):
         name = self.metadata[index][0]
         data = {
             'image': load_image(join(self.train_data_dir, name)),
-            'condition_image': load_image(join(self.condition_data_dir, name))
+            'condition_image': load_image(join(self.condition_data_dir, splitext(name)[0] + '.jpg'))
         }
         data = self.image_transforms(data)
         example["pixel_values"] = self.img_normalize(data['image'])
