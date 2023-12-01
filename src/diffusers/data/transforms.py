@@ -1,6 +1,8 @@
+# Copyright (c) wilson.xu. All rights reserved.
 import numbers
 from collections.abc import Sequence
 import numpy as np
+import cv2
 from PIL import Image
 
 import torch
@@ -13,7 +15,7 @@ __all__ = [
     'Resize', 'CenterCrop', 'RandomCrop',
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
-    'ColorJitter',
+    'ColorJitter', 'DrawCanny',
 ]
 
 
@@ -495,7 +497,8 @@ class DrawPose(object):
                 canvas = draw_handpose(canvas, kpts, kpt_valid)
             data['condition_image'] = Image.fromarray(canvas)
         else:
-            raise Exception(f'Wrong type: {type(data)}')
+            raise Exception(f"Not found keys: [`image`, `condition`]")
+
         return data
 
     def __repr__(self) -> str:
@@ -654,3 +657,33 @@ class ColorJitter(torch.nn.Module):
             f", hue={self.hue})"
         )
         return s
+
+
+class DrawCanny(object):
+    def __init__(self, thr_a=[100, 50], thr_b=[200, 150]):
+        _log_api_usage_once(self)
+        self.thr_a = thr_a
+        self.thr_b = thr_b
+
+    def __call__(self, data):
+        assert isinstance(data, dict)
+
+        if 'image' in data:
+            img = np.array(data['image'])
+            canny = None
+            for a, b in zip(self.thr_a, self.thr_b):
+                if canny is None:
+                    canny = cv2.Canny(img, a, b).astype('bool')
+                else:
+                    canny = np.logical_or(canny, cv2.Canny(img, a, b).astype('bool'))
+
+            canny = canny.astype('uint8') * 255
+            canny = np.tile(canny[..., None], [1, 1, 3])
+            data['condition_image'] = Image.fromarray(canny)
+        else:
+            raise Exception(f"Not found keys: [`image`]")
+
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"

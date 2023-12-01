@@ -29,7 +29,7 @@ from diffusers.utils.vip_utils import load_image
 
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
-    'ConDepthDataset', 'ConPoseDataset',
+    'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
 ]
 
 
@@ -392,9 +392,74 @@ class ConPoseDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         example = {}
         name = self.metadata[index][0]
+        data = {
+            'image': load_image(join(self.train_data_dir, name)),
+            'condition': pkl_load(
+                join(self.condition_data_dir, splitext(name)[0] + '_pose.pkl'))
+        }
+        data = self.image_transforms(data)
+        example["pixel_values"] = self.img_normalize(data['image'])
+        example["conditioning_pixel_values"] = data['condition_image']
+
+        if random.random() < self.drop_text:
+            text_inputs = self.empty_text_inputs
+        else:
+            captions = self.metadata[index][1]
+            text_inputs = self.tokenizer(
+                captions, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt"
+            )
+        example["input_ids"] = text_inputs.input_ids
+
+        return example
+
+
+class ConCannyDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_csv,
+        train_data_dir,
+        condition_data_dir,
+        tokenizer,
+        img_size=512,
+        drop_text=0.1
+    ):
+        assert os.path.exists(dataset_csv)
+        assert os.path.exists(train_data_dir)
+        assert os.path.exists(condition_data_dir)
+        if drop_text < 0. or drop_text > 1.:
+            raise ValueError("`drop_text` must be in the range [0., 1.].")
+
+        self.dataset_csv = dataset_csv
+        self.train_data_dir = train_data_dir
+        self.condition_data_dir = condition_data_dir
+        self.tokenizer = tokenizer
+        self.drop_text = drop_text
+        self.empty_text_inputs = tokenizer(
+            "", max_length=tokenizer.model_max_length,
+            padding="max_length", truncation=True, return_tensors="pt")
+
+        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
+        self._length = len(self.metadata)
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                RandomCrop(img_size),
+                DrawCanny(),
+                RandomHorizontalFlip(),
+                ToTensor(),
+            ]
+        )
+        self.img_normalize = Normalize([0.5], [0.5])
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, index):
+        example = {}
+        name = self.metadata[index][0]
         data = {'image': load_image(join(self.train_data_dir, name))}
-        data['condition'] = pkl_load(
-            join(self.condition_data_dir, splitext(name)[0] + '_pose.pkl'))
         data = self.image_transforms(data)
         example["pixel_values"] = self.img_normalize(data['image'])
         example["conditioning_pixel_values"] = data['condition_image']
