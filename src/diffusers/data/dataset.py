@@ -217,19 +217,14 @@ class ControlNetDataset(torch.utils.data.Dataset):
 
 
 class FaceDataset(torch.utils.data.Dataset):
-    """
-    A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
-    It pre-processes the images and the tokenizes prompts.
-    """
-
     def __init__(
-        self,
-        dataset_csv,
-        train_data_dir,
-        tokenizer,
-        img_size=512,
-        random_hflip=False,
-        drop_text=0.1
+            self,
+            dataset_csv,
+            train_data_dir,
+            tokenizer,
+            img_size=512,
+            drop_text=0.1,
+            keep_in_memory=False
     ):
         assert os.path.exists(dataset_csv)
         assert os.path.exists(train_data_dir)
@@ -240,22 +235,24 @@ class FaceDataset(torch.utils.data.Dataset):
         self.train_data_dir = train_data_dir
         self.tokenizer = tokenizer
         self.drop_text = drop_text
+        self.keep_in_memory = keep_in_memory
         self.empty_text_inputs = tokenizer(
             "", max_length=tokenizer.model_max_length,
             padding="max_length", truncation=True, return_tensors="pt")
 
         self.metadata = pandas.read_csv(dataset_csv).values.tolist()
         self._length = len(self.metadata)
-        self.image_list = []
-        for name, caption in tqdm(self.metadata):
-            img = load_image(join(train_data_dir, name))
-            self.image_list.append(img)
+        if keep_in_memory:
+            self.image_list = []
+            for name, caption in tqdm(self.metadata):
+                img = load_image(join(train_data_dir, name))
+                self.image_list.append(img)
 
         self.image_transforms = tv_transforms.Compose(
             [
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
                 RandomCrop(img_size),
-                RandomHorizontalFlip() if random_hflip else tv_transforms.Lambda(lambda x: x),
+                RandomHorizontalFlip(),
                 ToTensor(),
                 Normalize([0.5], [0.5]),
             ]
@@ -265,13 +262,18 @@ class FaceDataset(torch.utils.data.Dataset):
         return self._length
 
     def __getitem__(self, index):
+        name, captions = self.metadata[index]
+
         example = {}
-        example["pixel_values"] = self.image_transforms(self.image_list[index])
+        if self.keep_in_memory:
+            example["pixel_values"] = self.image_transforms(self.image_list[index])
+        else:
+            image = load_image(join(self.train_data_dir, name))
+            example["pixel_values"] = self.image_transforms(image)
 
         if random.random() < self.drop_text:
             text_inputs = self.empty_text_inputs
         else:
-            captions = self.metadata[index][1]
             text_inputs = self.tokenizer(
                 captions, max_length=self.tokenizer.model_max_length,
                 padding="max_length", truncation=True, return_tensors="pt"
