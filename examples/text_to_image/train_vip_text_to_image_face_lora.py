@@ -168,11 +168,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--random_hflip",
-        action="store_true",
-        help="whether to randomly flip images horizontally",
-    )
-    parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=200)
@@ -324,6 +319,14 @@ def parse_args():
         type=float,
         default=0.1,
         help="0.1 dropping of the text-conditioning to improve classifier-free guidance sampling."
+    )
+    parser.add_argument(
+        "--keep_in_memory",
+        default=False,
+        action="store_true",
+        help=(
+            "Whether to load all of data into memory at once."
+        ),
     )
     parser.add_argument(
         "--prefetch",
@@ -565,12 +568,12 @@ def main(args):
 
     # Dataset and DataLoaders creation:
     train_dataset = FaceDataset(
-        dataset_csv=args.dataset_csv,
-        train_data_dir=args.train_data_dir,
-        tokenizer=tokenizer,
+        args.dataset_csv,
+        args.train_data_dir,
+        tokenizer,
         img_size=args.resolution,
-        random_hflip=args.random_hflip,
         drop_text=args.drop_text,
+        keep_in_memory=args.keep_in_memory,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
