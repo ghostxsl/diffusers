@@ -421,20 +421,17 @@ class ConCannyDataset(torch.utils.data.Dataset):
         self,
         dataset_csv,
         train_data_dir,
-        condition_data_dir,
         tokenizer,
         img_size=512,
         drop_text=0.1
     ):
         assert os.path.exists(dataset_csv)
         assert os.path.exists(train_data_dir)
-        assert os.path.exists(condition_data_dir)
         if drop_text < 0. or drop_text > 1.:
             raise ValueError("`drop_text` must be in the range [0., 1.].")
 
         self.dataset_csv = dataset_csv
         self.train_data_dir = train_data_dir
-        self.condition_data_dir = condition_data_dir
         self.tokenizer = tokenizer
         self.drop_text = drop_text
         self.empty_text_inputs = tokenizer(

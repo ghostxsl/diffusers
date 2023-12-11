@@ -173,11 +173,16 @@ def parse_args():
         default="controlnet-model",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=1024,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
@@ -335,16 +340,6 @@ def parse_args():
         default=None,
         help=(
             "A folder containing the training data. Folder contents must follow the structure described in"
-            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
-            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
-        ),
-    )
-    parser.add_argument(
-        "--condition_data_dir",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the conditional training data. Folder contents must follow the structure described in"
             " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
             " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
         ),
@@ -599,7 +594,6 @@ def main(args):
     train_dataset = ConCannyDataset(
         dataset_csv=args.dataset_csv,
         train_data_dir=args.train_data_dir,
-        condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
         img_size=args.resolution,
         drop_text=args.drop_text
