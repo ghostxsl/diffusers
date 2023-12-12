@@ -1,0 +1,9 @@
+accelerate
+transformers
+einops
+av
+safetensors
+tqdm
+pandas
+opencv-python
+matplotlib
