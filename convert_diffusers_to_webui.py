@@ -115,6 +115,8 @@ def convert_controlnet(checkpoint, map_path, prefix='control_model.'):
         else:
             raise Exception(f"No key: {k} in keys map")
 
+    return out
+
 
 def main(args):
     device = torch.device(args.device)

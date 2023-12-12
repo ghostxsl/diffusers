@@ -15,21 +15,25 @@
 
 import os
 from os.path import join, splitext
+import numpy as np
 import pandas
 import random
 from tqdm.auto import tqdm
-from PIL import Image, ImageOps
+from collections import OrderedDict
+from PIL import Image
 import torch
 from torchvision import transforms as tv_transforms
 
 from .transforms import *
 from .utils import *
 from diffusers.utils.vip_utils import load_image
+from .videoreader import VideoReader
 
 
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
+    'AnimateAnyoneDataset',
 ]
 
 
@@ -472,5 +476,154 @@ class ConCannyDataset(torch.utils.data.Dataset):
                 padding="max_length", truncation=True, return_tensors="pt"
             )
         example["input_ids"] = text_inputs.input_ids
+
+        return example
+
+
+class AnimateAnyoneDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_csv,
+            train_data_dir,
+            condition_data_dir,
+            tokenizer,
+            clip_processor,
+            img_size=512,
+            drop_text=0.1,
+            num_frames=24,
+            stride=4,
+            is_video=False,
+    ):
+        assert os.path.exists(dataset_csv)
+        assert os.path.exists(train_data_dir)
+        assert os.path.exists(condition_data_dir)
+        if drop_text < 0. or drop_text > 1.:
+            raise ValueError("`drop_text` must be in the range [0., 1.].")
+
+        self.dataset_csv = dataset_csv
+        self.train_data_dir = train_data_dir
+        self.condition_data_dir = condition_data_dir
+        self.tokenizer = tokenizer
+        self.clip_processor = clip_processor
+        self.drop_text = drop_text
+        self.num_frames = num_frames
+        self.stride = stride
+        self.is_video = is_video
+        self.clip_length = (self.num_frames - 1) * self.stride + 1
+        self.empty_text_inputs = tokenizer(
+            "", max_length=tokenizer.model_max_length,
+            padding="max_length", truncation=True, return_tensors="pt")
+
+        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
+
+        self.video_to_image = OrderedDict()
+        for name, captions in self.metadata:
+            video_name = name.split('_')[0]
+            if video_name not in self.video_to_image:
+                self.video_to_image[video_name] = [name]
+            else:
+                self.video_to_image[video_name].append(name)
+
+        self._length = len(self.metadata) if not is_video else len(self.video_to_image)
+        self.video_names = list(self.video_to_image.keys())
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                ResizePadToTensor(img_size, interpolation='bilinear'),
+                RandomHorizontalFlip(),
+            ]
+        )
+        self.img_normalize = Normalize([0.5], [0.5], inplace=True)
+
+    def __len__(self):
+        return self._length
+
+    def to_tensor(self, img, dtype=torch.float32):
+        img = np.array(img).transpose((2, 0, 1))
+        img = torch.from_numpy(img).contiguous()
+
+        return img.to(dtype).div(255.0)
+
+    def get_frames(self, video_list):
+        st_idx = random.randint(0, self.stride - 1)
+        samples_idx = list(range(st_idx, len(video_list), self.stride))
+        if len(samples_idx) >= self.num_frames:
+            st_idx = random.randint(0, len(samples_idx) - self.num_frames)
+            samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
+        else:
+            samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
+
+        images, condition_images = [], []
+        for i in samples_idx:
+            name = video_list[i]
+            img = load_image(join(self.train_data_dir, name))
+            condition_img = load_image(join(self.condition_data_dir, name))
+
+            images.append(self.to_tensor(img))
+            condition_images.append(self.to_tensor(condition_img))
+
+        images = torch.stack(images)
+        condition_images = torch.stack(condition_images)
+        ref_name = video_list[random.choice(samples_idx)]
+        reference_image = load_image(join(self.train_data_dir, ref_name))
+
+        return images, condition_images, reference_image
+
+    def get_data(self, index):
+        if self.is_video:
+            # train with video
+            captions = ""
+            video_name = self.video_names[index]
+            images, condition_images, reference_image = self.get_frames(
+                self.video_to_image[video_name])
+            data = {
+                'image': images,
+                'condition_image': condition_images,
+                'reference_image': reference_image
+            }
+        else:
+            # train with image
+            name, captions = self.metadata[index]
+            video_name = name.split('_')[0]
+            video_list = self.video_to_image[video_name]
+            if len(video_list) > 2 * self.clip_length:
+                idx = video_list.index(name)
+                st_idx = idx - self.clip_length if idx - self.clip_length >= 0 else 0
+                end_idx = idx + self.clip_length if idx + self.clip_length < len(video_list) else len(video_list)
+
+                st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
+                end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
+                ref_name = random.choice(video_list[st_idx: end_idx])
+            else:
+                ref_name = random.choice(video_list)
+            data = {
+                'image': self.to_tensor(load_image(join(self.train_data_dir, name))),
+                'condition_image': self.to_tensor(load_image(join(self.condition_data_dir, name))),
+                'reference_image': load_image(join(self.train_data_dir, ref_name))
+            }
+        data = self.image_transforms(data)
+
+        return data, captions
+
+    def __getitem__(self, index):
+        example = {}
+        data, captions = self.get_data(index)
+
+        example["pixel_values"] = self.img_normalize(data['image'])
+        example["conditioning_pixel_values"] = data['condition_image']
+
+        if random.random() < self.drop_text:
+            text_inputs = self.empty_text_inputs
+            data['reference_image'] = Image.new("RGB", data['reference_image'].size)
+        else:
+            text_inputs = self.tokenizer(
+                captions, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt"
+            )
+
+        example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
+        example["input_ids"] = text_inputs.input_ids
+        example["reference_image"] = self.clip_processor(
+            images=data["reference_image"], return_tensors="pt").pixel_values
 
         return example

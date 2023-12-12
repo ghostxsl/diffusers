@@ -8,7 +8,8 @@ import numpy as np
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn',
-    'pkl_load', 'pkl_save'
+    'pkl_load', 'pkl_save',
+    'animate_collate_fn'
 ]
 
 
@@ -31,6 +32,29 @@ def controlnet_collate_fn(examples):
         "pixel_values": pixel_values,
         "conditioning_pixel_values": conditioning_pixel_values,
         "input_ids": input_ids,
+    }
+
+
+def animate_collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
+    conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    reference_pixel_values = torch.stack([example["reference_pixel_values"] for example in examples])
+    reference_pixel_values = reference_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    input_ids = torch.cat([example["input_ids"] for example in examples])
+
+    reference_image = torch.cat([example["reference_image"] for example in examples])
+
+    return {
+        "pixel_values": pixel_values,
+        "conditioning_pixel_values": conditioning_pixel_values,
+        "reference_pixel_values": reference_pixel_values,
+        "input_ids": input_ids,
+        "reference_image": reference_image,
     }
 
 
