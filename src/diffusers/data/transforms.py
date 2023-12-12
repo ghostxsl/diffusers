@@ -15,7 +15,7 @@ __all__ = [
     'Resize', 'CenterCrop', 'RandomCrop',
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
-    'ColorJitter', 'DrawCanny',
+    'ColorJitter', 'DrawCanny', 'ResizePadToTensor',
 ]
 
 
@@ -687,3 +687,111 @@ class DrawCanny(object):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
+
+
+class ResizePadToTensor(object):
+    def __init__(self,
+                 size,
+                 interpolation='bilinear',
+                 pad_values=255):
+        super().__init__()
+        _log_api_usage_once(self)
+        if not isinstance(size, (int, Sequence)):
+            raise TypeError(f"Size should be int or sequence. Got {type(size)}")
+        if isinstance(size, Sequence) and len(size) != 2:
+            raise ValueError("If size is a sequence, it should have 2 values")
+        self.size = size
+        self.interpolation = interpolation
+        self.pad_values = pad_values
+
+    def resize_and_pad_pil(self, img, pad_values=255):
+        w, h = img.size
+        # resize
+        if isinstance(self.size, int):
+            if w > h:
+                h = int(self.size / w * h)
+                w = self.size
+            elif h > w:
+                w = int(self.size / h * w)
+                h = self.size
+        elif isinstance(self.size, Sequence):
+            w, h = self.size[::-1]
+        img = img.resize((w, h), resample=Image.LANCZOS)
+
+        # pad
+        img = np.array(img)
+        if w > h:
+            pad_ = w - h
+            img = np.pad(
+                img,
+                ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0)),
+                constant_values=pad_values
+            )
+        elif h > w:
+            pad_ = h - w
+            img = np.pad(
+                img,
+                ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0)),
+                constant_values=pad_values
+            )
+
+        return Image.fromarray(img)
+
+    def resize_and_pad_tensor(self, img, pad_values=255):
+        h, w = img.shape[-2:]
+        # resize
+        if isinstance(self.size, int):
+            if w > h:
+                h = int(self.size / w * h)
+                w = self.size
+            elif h > w:
+                w = int(self.size / h * w)
+                h = self.size
+        elif isinstance(self.size, Sequence):
+            w, h = self.size[::-1]
+
+        if img.ndim == 3:
+            img = img.unsqueeze(0)
+            img = torch.nn.functional.interpolate(img, size=[h, w], mode=self.interpolation)
+            img = img.squeeze(0)
+        elif img.ndim == 4:
+            img = torch.nn.functional.interpolate(img, size=[h, w], mode=self.interpolation)
+
+        # pad
+        if w > h:
+            pad_ = w - h
+            img = torch.nn.functional.pad(
+                img,
+                (0, 0, pad_ // 2, pad_ - pad_ // 2),
+                value=pad_values / 255.
+            )
+        elif h > w:
+            pad_ = h - w
+            img = torch.nn.functional.pad(
+                img,
+                (pad_ // 2, pad_ - pad_ // 2, 0, 0),
+                value=pad_values / 255.
+            )
+
+        return img
+
+    def __call__(self, img):
+        if isinstance(img, dict):
+            for k, v in img.items():
+                if 'image' in k:
+                    if isinstance(v, Image.Image):
+                        img[k] = self.resize_and_pad_pil(
+                            v, pad_values=self.pad_values if k != 'condition_image' else 0)
+                    elif isinstance(v, torch.Tensor):
+                        img[k] = self.resize_and_pad_tensor(
+                            v, pad_values=self.pad_values if k != 'condition_image' else 0)
+        else:
+            if isinstance(img, Image.Image):
+                img = self.resize_and_pad_pil(img, self.pad_values)
+            elif isinstance(img, torch.Tensor):
+                img = self.resize_and_pad_tensor(img, self.pad_values)
+        return img
+
+    def __repr__(self) -> str:
+        detail = f"(size={self.size}, interpolation={self.interpolation}"
+        return f"{self.__class__.__name__}{detail}"
