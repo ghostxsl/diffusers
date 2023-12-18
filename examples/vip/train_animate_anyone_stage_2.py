@@ -50,6 +50,7 @@ from diffusers.utils.import_utils import is_xformers_available
 from diffusers.data import AnimateAnyoneDataset, animate_collate_fn
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.pose_guider import PoseGuider
 
 
 logger = get_logger(__name__)
@@ -128,25 +129,25 @@ def parse_args():
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
-        "--controlnet_model_path",
+        "--pose_guider_model_path",
         type=str,
         default=None,
-        help="Path to pretrained controlnet model or model identifier from huggingface.co/models."
-        " If not specified controlnet weights are initialized from unet.",
+        help="Path to pretrained pose_guider model or model identifier from huggingface.co/models."
+        " If not specified, weights are initialized from unet.",
     )
     parser.add_argument(
         "--referencenet_model_path",
         type=str,
         default=None,
         help="Path to pretrained referencenet model or model identifier from huggingface.co/models."
-             " If not specified controlnet weights are initialized from unet.",
+             " If not specified, weights are initialized from unet.",
     )
     parser.add_argument(
         "--motion_adapter_model_path",
         type=str,
         default=None,
         help="Path to pretrained motion_adapter model or model identifier from huggingface.co/models."
-             " If not specified controlnet weights are initialized from unet.",
+             " If not specified, weights are initialized from unet.",
     )
     parser.add_argument(
         "--output_dir",
@@ -154,13 +155,18 @@ def parse_args():
         default="animate_model",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--resolution",
         type=int,
-        default=768,
+        default=512,
         help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            "The resolution for input images, all the images in the train dataset will be resized to this"
             " resolution"
         ),
     )
@@ -175,9 +181,9 @@ def parse_args():
         default=4,
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=40)
+    parser.add_argument("--num_train_epochs", type=int, default=80)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -238,7 +244,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=50, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -357,7 +363,7 @@ def parse_args():
         default=None,
         nargs="+",
         help=(
-            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`. "
+            "A set of paths to the model conditioning image be evaluated every `--validation_steps`. "
             "Provide either a matching number of `--validation_prompt`s, a"
             " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
             " `--validation_image` that will be used with all `--validation_prompt`s."
@@ -411,7 +417,7 @@ def parse_args():
 
     if args.resolution % 8 != 0:
         raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
+            "`--resolution` must be divisible by 8 for consistently sized encoded images in the VAE."
         )
 
     return args
@@ -449,7 +455,6 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-            os.makedirs(os.path.join(args.output_dir, "validation"), exist_ok=True)
 
     # Load the tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -477,9 +482,9 @@ def main(args):
     )
     unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
 
-    # Load ControlNet
-    logger.info("Loading existing controlnet weights")
-    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_path)
+    # Load PoseGuider
+    logger.info("Loading existing pose_guider weights")
+    pose_guider = PoseGuider.from_pretrained(args.pose_guider_model_path)
 
     # Load ReferenceNet
     logger.info("Loading existing referencenet weights")
@@ -488,7 +493,7 @@ def main(args):
     text_encoder.requires_grad_(False)
     image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
-    controlnet.requires_grad_(False)
+    pose_guider.requires_grad_(False)
     referencenet.requires_grad_(False)
     unet.freeze_unet2d_params()
 
@@ -529,7 +534,6 @@ def main(args):
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
-            controlnet.enable_xformers_memory_efficient_attention()
             referencenet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
@@ -643,7 +647,7 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     image_encoder.to(accelerator.device, dtype=weight_dtype)
-    controlnet.to(accelerator.device, dtype=weight_dtype)
+    pose_guider.to(accelerator.device, dtype=weight_dtype)
     referencenet.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -742,16 +746,12 @@ def main(args):
 
                 encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
 
-                # run controlnet
+                # run pose_guider
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 controlnet_image = controlnet_image.reshape([-1, ] + list(controlnet_image.shape[-3:]))
-                down_block_res_samples, mid_block_res_sample = controlnet(
-                    noisy_latents.reshape([-1,] + list(noisy_latents.shape[-3:])),
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states.repeat(controlnet_image.shape[0], 1, 1),
-                    controlnet_cond=controlnet_image,
-                    return_dict=False,
-                )
+                pose_latents = pose_guider(controlnet_image)
+                pose_latents = pose_latents.reshape(
+                    list(noisy_latents.shape[:2]) + list(pose_latents.shape[-3:]))
 
                 # reference image latents
                 reference_latents = vae.encode(
@@ -762,15 +762,12 @@ def main(args):
                 reference_control_reader.update(reference_control_writer, dtype=weight_dtype)
 
                 # Predict the noise residual
+                noisy_latents += pose_latents
                 noisy_latents = noisy_latents.permute((0, 2, 1, 3, 4))
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
-                    down_block_additional_residuals=[
-                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                    ],
-                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                 ).sample
 
                 # Get the target for loss depending on the prediction type
@@ -821,19 +818,6 @@ def main(args):
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
-
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        image_logs = log_validation(
-                            vae,
-                            text_encoder,
-                            tokenizer,
-                            unet,
-                            controlnet,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
