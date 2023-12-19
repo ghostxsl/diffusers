@@ -762,10 +762,8 @@ def main(args):
                 reference_control_reader.update(reference_control_writer, dtype=weight_dtype)
 
                 # Predict the noise residual
-                noisy_latents += pose_latents
-                noisy_latents = noisy_latents.permute((0, 2, 1, 3, 4))
                 model_pred = unet(
-                    noisy_latents,
+                    (noisy_latents + pose_latents).permute((0, 2, 1, 3, 4)),
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
                 ).sample
