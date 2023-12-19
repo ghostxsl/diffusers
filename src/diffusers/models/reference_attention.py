@@ -94,7 +94,6 @@ class ReferenceAttentionControl(object):
                                                    [norm_hidden_states] + self.bank, dim=1),
                                                attention_mask=attention_mask) + hidden_states
 
-                    self.bank.clear()
                     if self.attn2 is not None:
                         # Cross-Attention
                         norm_hidden_states = (
