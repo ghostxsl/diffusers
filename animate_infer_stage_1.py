@@ -2,7 +2,6 @@ import os
 from os.path import join, splitext
 from collections import OrderedDict
 import random
-import cv2
 import numpy as np
 from PIL import Image, ImageOps
 import pandas
@@ -11,6 +10,7 @@ import torch
 from transformers import AutoProcessor, CLIPVisionModel
 from diffusers.pipelines.vip.vip_animate_image import VIPAnimateImagePipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
+from diffusers.models import ControlNetModel
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.models.pose_guider import PoseGuider
 from diffusers.utils.vip_utils import *
@@ -26,8 +26,9 @@ csv_file = join(root_dir, "train_png.csv")
 img_dir = join(root_dir, "train_png")
 pose_dir = join(root_dir, "train_png_pose")
 base_path = "/xsl/wilson.xu/weights/stable-diffusion-v1-5"
-pose_guider_path = "/xsl/wilson.xu/pose_guider"
-referencenet_model_path = "/xsl/wilson.xu/referencenet"
+pose_guider_path = "/xsl/wilson.xu/animate_sd1.5_ctrl_10/pose_guider"
+referencenet_model_path = "/xsl/wilson.xu/animate_sd1.5_ctrl_10/referencenet"
+controlnet_path = "/xsl/wilson.xu/animate_sd1.5_ctrl_10/controlnet"
 os.makedirs(out_dir, exist_ok=True)
 
 
@@ -103,20 +104,19 @@ if __name__ == '__main__':
             video_to_image[video_name].append(name)
 
     feature_extractor = AutoProcessor.from_pretrained(join(base_path, "image_encoder"))
-    image_encoder = CLIPVisionModel.from_pretrained(base_path, subfolder="image_encoder")
-    pose_guider = PoseGuider.from_pretrained(pose_guider_path)
-    referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path)
+    image_encoder = CLIPVisionModel.from_pretrained(base_path, subfolder="image_encoder").to(device, dtype=dtype)
+    controlnet = ControlNetModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
+    # pose_guider = PoseGuider.from_pretrained(pose_guider_path).to(device, dtype=dtype)
+    referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
     pipe = VIPAnimateImagePipeline.from_pretrained(
         base_path,
         feature_extractor=feature_extractor,
         image_encoder=image_encoder,
-        pose_guider=pose_guider,
+        controlnet=controlnet,
+        # pose_guider=pose_guider,
         referencenet=referencenet,
         torch_dtype=dtype).to(device)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    pipe.image_encoder = pipe.image_encoder.to(device, dtype=dtype)
-    pipe.pose_guider = pipe.pose_guider.to(device, dtype=dtype)
-    pipe.referencenet = pipe.referencenet.to(device, dtype=dtype)
 
     seed = get_fixed_seed(-1)
     generator = get_torch_generator(seed, device=device)
@@ -137,7 +137,9 @@ if __name__ == '__main__':
             num_images_per_prompt=1,
             generator=generator,
         )
-        out_img = np.concatenate([pose.resize((512, 512), 1), gt_img.resize((512, 512), 1), out[0]], axis=1)
+        out_img = np.concatenate(
+            [reference.resize((512, 512), 1), pose.resize((512, 512), 1),
+             gt_img.resize((512, 512), 1), out[0]], axis=1)
         Image.fromarray(out_img).save(join(out_dir, k + '.png'))
 
     print('Done!')

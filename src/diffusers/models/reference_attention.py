@@ -76,7 +76,7 @@ class ReferenceAttentionControl(object):
                 )
             else:
                 if MODE == "write":
-                    self.bank.append(norm_hidden_states.clone())
+                    self.bank = norm_hidden_states
                     if hasattr(self, 'is_final_block') and self.is_final_block:
                         return norm_hidden_states
                     attn_output = self.attn1(
@@ -86,12 +86,12 @@ class ReferenceAttentionControl(object):
                         **cross_attention_kwargs,
                     )
                 elif MODE == "read":
-                    if norm_hidden_states.shape[0] != self.bank[0].shape[0]:
-                        self.bank[0] = self.bank[0].repeat_interleave(
+                    if norm_hidden_states.shape[0] != self.bank.shape[0]:
+                        self.bank = self.bank.repeat_interleave(
                             repeats=norm_hidden_states.shape[0], dim=0)
                     hidden_states = self.attn1(norm_hidden_states,
                                                encoder_hidden_states=torch.cat(
-                                                   [norm_hidden_states] + self.bank, dim=1),
+                                                   [norm_hidden_states, self.bank], dim=1),
                                                attention_mask=attention_mask) + hidden_states
 
                     if self.attn2 is not None:
@@ -165,7 +165,7 @@ class ReferenceAttentionControl(object):
         for i, (name, module) in enumerate(attn_modules):
             module._original_inner_forward = module.forward
             module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
-            module.bank = []
+            module.bank = None
 
     def update(self, writer, dtype=torch.float32):
         if self.fusion_blocks == "midup":
@@ -176,8 +176,7 @@ class ReferenceAttentionControl(object):
             writer_attn_modules = torch_attn_dfs(writer.unet)
 
         for (_, r), (_, w) in zip(reader_attn_modules, writer_attn_modules):
-            r.bank = [v.clone().to(dtype) for v in w.bank]
-            # w.bank.clear()
+            r.bank = w.bank.to(dtype)
 
     def clear(self):
         if self.fusion_blocks == "midup":
@@ -186,4 +185,4 @@ class ReferenceAttentionControl(object):
             attn_modules = torch_attn_dfs(self.unet)
 
         for name, module in attn_modules:
-            module.bank.clear()
+            module.bank = None

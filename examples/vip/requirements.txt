@@ -7,3 +7,4 @@ tqdm
 pandas
 opencv-python
 matplotlib
+peft
