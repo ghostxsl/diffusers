@@ -193,9 +193,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=30)
+    parser.add_argument("--num_train_epochs", type=int, default=60)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -442,7 +442,7 @@ def main(args):
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
 
     # import correct image encoder class
-    image_encoder = CLIPVisionModel.from_pretrained(args.pretrained_model_path, subfolder="image_encoder")
+    # image_encoder = CLIPVisionModel.from_pretrained(args.pretrained_model_path, subfolder="image_encoder")
     clip_processor = AutoProcessor.from_pretrained(os.path.join(args.pretrained_model_path, "image_encoder"))
 
     # Load scheduler and models
@@ -504,7 +504,7 @@ def main(args):
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     text_encoder.requires_grad_(False)
-    image_encoder.requires_grad_(False)
+    # image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
     unet.requires_grad_(False)
 
@@ -562,7 +562,11 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = list(controlnet.parameters()) + list(referencenet.parameters())
+    params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
+    params_to_optimize = [
+        {"params": list(referencenet.parameters())},
+        {"params": list(controlnet.parameters()), "lr": 1e-6}
+    ]
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -630,7 +634,7 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
+    # image_encoder.to(accelerator.device, dtype=weight_dtype)
     # controlnet.to(accelerator.device, dtype=weight_dtype)
     # referencenet.to(accelerator.device, dtype=weight_dtype)
 
@@ -728,9 +732,8 @@ def main(args):
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
                 # image embedding
-                image_embeds = image_encoder(batch["reference_image"].to(dtype=weight_dtype))[0]
-
-                encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
+                # image_embeds = image_encoder(batch["reference_image"].to(dtype=weight_dtype))[0]
+                # encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
 
                 # run controlnet
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
@@ -769,7 +772,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
