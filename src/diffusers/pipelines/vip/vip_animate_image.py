@@ -209,7 +209,6 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         return prompt_embeds, negative_prompt_embeds
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
     def encode_image(self, image, device, num_images_per_prompt, do_classifier_free_guidance=False):
         dtype = next(self.image_encoder.parameters()).dtype
         uncond_image_embeds = None
@@ -466,15 +465,11 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             negative_prompt_embeds=negative_prompt_embeds,
         )
 
-        image_embeds, negative_image_embeds = self.encode_image(
-            reference_image, device, num_images_per_prompt, do_classifier_free_guidance
-        )
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
         if do_classifier_free_guidance:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-            image_embeds = torch.cat([negative_image_embeds, image_embeds])
 
         # 2. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -494,8 +489,8 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         # 4. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-        # Concat image embeds
-        encoder_hidden_states = torch.cat([prompt_embeds, image_embeds], dim=1)
+
+        encoder_hidden_states = prompt_embeds
 
         # Prepare control image
         control_image = self.prepare_control_image(

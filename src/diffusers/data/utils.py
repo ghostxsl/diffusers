@@ -47,7 +47,10 @@ def animate_collate_fn(examples):
 
     input_ids = torch.cat([example["input_ids"] for example in examples])
 
-    reference_image = torch.cat([example["reference_image"] for example in examples])
+    if 'reference_image' in examples[0]:
+        reference_image = torch.cat([example["reference_image"] for example in examples])
+    else:
+        reference_image = torch.zeros([0])
 
     return {
         "pixel_values": pixel_values,

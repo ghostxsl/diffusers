@@ -18,6 +18,7 @@ import argparse
 import logging
 import math
 import os
+from os.path import join
 import shutil
 from pathlib import Path
 
@@ -30,21 +31,21 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
-from PIL import Image
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, CLIPTextModel, AutoProcessor, CLIPVisionModel
+from transformers import AutoTokenizer, CLIPTextModel
+from peft import LoraConfig, get_peft_model_state_dict
+from safetensors.torch import load_file, save_file
 
 import diffusers
 from diffusers import (
     AutoencoderKL,
     ControlNetModel,
     DDPMScheduler,
-    StableDiffusionControlNetPipeline,
     UNet2DConditionModel,
-    UniPCMultistepScheduler,
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
+from diffusers.loaders import LoraLoaderMixin
 from diffusers.data import AnimateAnyoneDataset, animate_collate_fn
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
@@ -53,67 +54,24 @@ from diffusers.models.referencenet import ReferenceNetModel
 logger = get_logger(__name__)
 
 
-def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step):
-    logger.info("Running validation... ")
+def get_module_kohya_state_dict(module,
+                                prefix,
+                                dtype=torch.float32,
+                                adapter_name="default"):
+    kohya_ss_state_dict = {}
+    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
+        kohya_key = prefix + "." + peft_key
+        kohya_key = kohya_key.replace("lora_A", "lora_down")
+        kohya_key = kohya_key.replace("lora_B", "lora_up")
+        kohya_key = kohya_key.replace(".", "_", kohya_key.count(".") - 2)
+        kohya_ss_state_dict[kohya_key] = weight.to(dtype)
 
-    controlnet = accelerator.unwrap_model(controlnet)
+        # Set alpha parameter
+        if "lora_down" in kohya_key:
+            alpha_key = f'{kohya_key.split(".")[0]}.alpha'
+            kohya_ss_state_dict[alpha_key] = torch.tensor(module.peft_config[adapter_name].lora_alpha).to(dtype)
 
-    pipeline = StableDiffusionControlNetPipeline.from_pretrained(
-        args.pretrained_model_path,
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=tokenizer,
-        unet=unet,
-        controlnet=controlnet,
-        safety_checker=None,
-        torch_dtype=weight_dtype,
-    )
-    pipeline.scheduler = UniPCMultistepScheduler.from_config(pipeline.scheduler.config)
-    pipeline = pipeline.to(accelerator.device)
-    pipeline.set_progress_bar_config(disable=True)
-
-    if args.enable_xformers_memory_efficient_attention:
-        pipeline.enable_xformers_memory_efficient_attention()
-
-    if args.seed is None:
-        generator = None
-    else:
-        generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )
-
-    image_logs = []
-
-    for validation_prompt, validation_image in zip(validation_prompts, validation_images):
-        validation_image = Image.open(validation_image).convert("RGB")
-
-        images = []
-
-        for _ in range(args.num_validation_images):
-            with torch.autocast("cuda"):
-                image = pipeline(
-                    validation_prompt, validation_image, num_inference_steps=20, generator=generator
-                ).images[0]
-
-            images.append(image)
-
-        image_logs.append(
-            {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
-        )
-
-    return image_logs
+    return kohya_ss_state_dict
 
 
 def parse_args():
@@ -322,48 +280,21 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--validation_prompt",
-        type=str,
-        default=None,
-        nargs="+",
-        help=(
-            "A set of prompts evaluated every `--validation_steps`."
-            " Provide either a matching number of `--validation_image`s, a single `--validation_image`"
-            " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
-        ),
-    )
-    parser.add_argument(
-        "--validation_image",
-        type=str,
-        default=None,
-        nargs="+",
-        help=(
-            "A set of paths to the controlnet conditioning image be evaluated every `--validation_steps`. "
-            "Provide either a matching number of `--validation_prompt`s, a"
-            " a single `--validation_prompt` to be used with all `--validation_image`s, or a single"
-            " `--validation_image` that will be used with all `--validation_prompt`s."
-        ),
-    )
-    parser.add_argument(
-        "--num_validation_images",
+        "--lora_rank",
         type=int,
-        default=4,
-        help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
+        default=64,
+        help="The rank of the LoRA projection matrix.",
     )
     parser.add_argument(
-        "--validation_steps",
+        "--lora_alpha",
         type=int,
-        default=100,
-        help=(
-            "Run validation every X steps. Validation consists of running the prompt"
-            " `args.validation_prompt` multiple times: `args.num_validation_images`"
-            " and logging the images."
-        ),
+        default=8,
+        help="The rank of the LoRA projection matrix.",
     )
     parser.add_argument(
         "--tracker_project_name",
         type=str,
-        default="train_controlnet",
+        default="train_animate",
         help=(
             "The `project_name` argument passed to Accelerator.init_trackers for"
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
@@ -371,24 +302,6 @@ def parse_args():
     )
 
     args = parser.parse_args()
-
-    if args.validation_prompt is not None and args.validation_image is None:
-        raise ValueError("`--validation_image` must be set if `--validation_prompt` is set")
-
-    if args.validation_prompt is None and args.validation_image is not None:
-        raise ValueError("`--validation_prompt` must be set if `--validation_image` is set")
-
-    if (
-        args.validation_image is not None
-        and args.validation_prompt is not None
-        and len(args.validation_image) != 1
-        and len(args.validation_prompt) != 1
-        and len(args.validation_image) != len(args.validation_prompt)
-    ):
-        raise ValueError(
-            "Must provide either 1 `--validation_image`, 1 `--validation_prompt`,"
-            " or the same number of `--validation_prompt`s and `--validation_image`s"
-        )
 
     if args.resolution % 8 != 0:
         raise ValueError(
@@ -431,19 +344,58 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
+    # `accelerate` 0.16.0 will have better support for customized saving
+    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+        def save_model_hook(models, weights, output_dir):
+            if accelerator.is_main_process:
+                while len(weights) > 0:
+                    weights.pop()
+                    model = models.pop()
+                    if isinstance(model, UNet2DConditionModel):
+                        sub_dir = "lora_unet"
+                        lora_state_dict = get_module_kohya_state_dict(model, "lora_unet", torch.float32)
+                        os.makedirs(join(output_dir, sub_dir), exist_ok=True)
+                        save_file(lora_state_dict, join(
+                            output_dir, sub_dir, "pytorch_lora_weights.safetensors"))
+                        continue
+                    elif isinstance(model, ControlNetModel):
+                        sub_dir = "controlnet"
+                    else:
+                        sub_dir = "referencenet"
+                    model.save_pretrained(join(output_dir, sub_dir))
+
+        def load_model_hook(models, input_dir):
+            while len(models) > 0:
+                # pop models so that they are not loaded again
+                model = models.pop()
+
+                if isinstance(model, UNet2DConditionModel):
+                    lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(
+                        input_dir, subfolder="lora_unet")
+                    LoraLoaderMixin.load_lora_into_unet(
+                        lora_state_dict, network_alphas=network_alphas, unet=model)
+                    continue
+                elif isinstance(model, ControlNetModel):
+                    # load diffusers style into model
+                    load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                else:
+                    load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="referencenet")
+                model.register_to_config(**load_model.config)
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+
+        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_load_state_pre_hook(load_model_hook)
+
     # Load the tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
         subfolder="tokenizer",
         use_fast=False,
     )
-
     # import correct text encoder class
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
-
-    # import correct image encoder class
-    # image_encoder = CLIPVisionModel.from_pretrained(args.pretrained_model_path, subfolder="image_encoder")
-    clip_processor = AutoProcessor.from_pretrained(os.path.join(args.pretrained_model_path, "image_encoder"))
 
     # Load scheduler and models
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
@@ -467,46 +419,52 @@ def main(args):
         referencenet = ReferenceNetModel.from_pretrained(args.referencenet_model_path)
     else:
         logger.info("Initializing referencenet weights from unet")
-        referencenet = ReferenceNetModel.from_pretrained(
-            args.pretrained_model_path,
-            subfolder="unet",
-        )
-
-    # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                while len(weights) > 0:
-                    weights.pop()
-                    model = models.pop()
-                    if isinstance(model, ControlNetModel):
-                        sub_dir = "controlnet"
-                    else:
-                        sub_dir = "referencenet"
-                    model.save_pretrained(os.path.join(output_dir, sub_dir))
-
-        def load_model_hook(models, input_dir):
-            while len(models) > 0:
-                # pop models so that they are not loaded again
-                model = models.pop()
-
-                if isinstance(model, ControlNetModel):
-                    # load diffusers style into model
-                    load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                else:
-                    load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="referencenet")
-                model.register_to_config(**load_model.config)
-                model.load_state_dict(load_model.state_dict())
-                del load_model
-
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
+        referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
     text_encoder.requires_grad_(False)
-    # image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
     unet.requires_grad_(False)
+
+    # For mixed precision training we cast the text_encoder and vae weights to half-precision
+    # as these models are only used for inference, keeping weights in full precision is not required.
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    # Move vae, unet and text_encoder to device and cast to weight_dtype
+    vae.to(accelerator.device, dtype=weight_dtype)
+    unet.to(accelerator.device, dtype=weight_dtype)
+    text_encoder.to(accelerator.device, dtype=weight_dtype)
+
+    # Add LoRA to the student U-Net, only the LoRA projection matrix will be updated by the optimizer.
+    lora_config = LoraConfig(
+        r=args.lora_rank,
+        target_modules=[
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            "proj_in",
+            "proj_out",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "conv1",
+            "conv2",
+            "conv_shortcut",
+            "downsamplers.0.conv",
+            "upsamplers.0.conv",
+        ],
+        lora_alpha=args.lora_alpha,
+    )
+    # Add adapter and make sure the trainable params are in float32.
+    unet.add_adapter(lora_config)
+    if args.mixed_precision == "fp16":
+        for param in unet.parameters():
+            # only upcast trainable parameters (LoRA) into fp32
+            if param.requires_grad:
+                param.data = param.data.to(torch.float32)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -526,17 +484,6 @@ def main(args):
     if args.gradient_checkpointing:
         controlnet.enable_gradient_checkpointing()
         referencenet.enable_gradient_checkpointing()
-
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
-
-    if accelerator.unwrap_model(referencenet).dtype != torch.float32:
-        raise ValueError(
-            f"ReferenceNet loaded as datatype {accelerator.unwrap_model(referencenet).dtype}. {low_precision_error_string}"
-        )
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -562,9 +509,11 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
+    params_to_clip = list(controlnet.parameters()) + list(
+        referencenet.parameters()) + [p for p in unet.parameters() if p.requires_grad]
     params_to_optimize = [
         {"params": list(referencenet.parameters())},
+        {"params": [p for p in unet.parameters() if p.requires_grad]},
         {"params": list(controlnet.parameters()), "lr": 1e-6}
     ]
     optimizer = optimizer_class(
@@ -581,7 +530,6 @@ def main(args):
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
-        clip_processor=clip_processor,
         img_size=args.resolution,
         drop_text=args.drop_text
     )
@@ -618,25 +566,9 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
     )
-
-    # For mixed precision training we cast the text_encoder and vae weights to half-precision
-    # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-
-    # Move vae, unet and text_encoder to device and cast to weight_dtype
-    vae.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
-    # image_encoder.to(accelerator.device, dtype=weight_dtype)
-    # controlnet.to(accelerator.device, dtype=weight_dtype)
-    # referencenet.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = len(train_dataloader)
@@ -649,11 +581,6 @@ def main(args):
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
-
-        # tensorboard cannot handle list types for config
-        tracker_config.pop("validation_prompt")
-        tracker_config.pop("validation_image")
-
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     # Train!
@@ -704,11 +631,12 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
+    unet.train()
     controlnet.train()
     referencenet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet, referencenet):
+            with accelerator.accumulate(unet, controlnet, referencenet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
@@ -730,10 +658,6 @@ def main(args):
 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-
-                # image embedding
-                # image_embeds = image_encoder(batch["reference_image"].to(dtype=weight_dtype))[0]
-                # encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
 
                 # run controlnet
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
@@ -818,6 +742,10 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        unet = accelerator.unwrap_model(unet)
+        lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
+        save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
+
         controlnet = accelerator.unwrap_model(controlnet)
         controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
 
