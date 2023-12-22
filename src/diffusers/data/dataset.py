@@ -487,7 +487,7 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             train_data_dir,
             condition_data_dir,
             tokenizer,
-            clip_processor,
+            clip_processor=None,
             img_size=512,
             drop_text=0.1,
             num_frames=24,
@@ -623,7 +623,8 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
 
         example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
         example["input_ids"] = text_inputs.input_ids
-        example["reference_image"] = self.clip_processor(
-            images=data["reference_image"], return_tensors="pt").pixel_values
+        if self.clip_processor is not None:
+            example["reference_image"] = self.clip_processor(
+                images=data["reference_image"], return_tensors="pt").pixel_values
 
         return example
