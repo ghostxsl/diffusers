@@ -7,17 +7,18 @@ from PIL import Image, ImageOps
 import pandas
 import torch
 
-from diffusers.pipelines.vip.vip_animate_image import VIPAnimateImagePipeline
+from diffusers.pipelines.vip.vip_animate_video import VIPAnimateVideoPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
-from diffusers.models import ControlNetModel
+from diffusers.models import ControlNetModel, MotionAdapter
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
+from diffusers.utils import export_to_gif, export_to_video
 
 
 device = torch.device("cuda")
 dtype = torch.float16
-stride = 4
-num_frames = 24
+stride = 10
+num_frames = 16
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
@@ -28,6 +29,7 @@ pose_dir = join(root_dir, "train_png_pose")
 base_path = "/xsl/wilson.xu/weights/film"
 referencenet_model_path = "/xsl/wilson.xu/animate_film_ctrl_100/referencenet"
 controlnet_path = "/xsl/wilson.xu/animate_film_ctrl_100/controlnet"
+motion_adapter_model_path = "/xsl/wilson.xu/animatediff-motion-adapter-v1-5-2"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -72,7 +74,7 @@ def pad_image(img, pad_values=255):
     return Image.fromarray(img)
 
 
-def get_reference_pose_frame(video_list):
+def get_reference_pose_frames(video_list):
     st_idx = random.randint(0, stride - 1)
     samples_idx = list(range(st_idx, len(video_list), stride))
     if len(samples_idx) >= num_frames:
@@ -81,17 +83,22 @@ def get_reference_pose_frame(video_list):
     else:
         samples_idx = samples_idx + [samples_idx[-1], ] * (num_frames - len(samples_idx))
 
-    name = video_list[random.choice(samples_idx)]
-    img = load_image(join(img_dir, name))
-    img = pad_image(img)
-    pose = load_image(join(pose_dir, name))
-    pose = pad_image(pose, 0)
+    pose_list, imgs = [], []
+    for i in samples_idx:
+        name = video_list[i]
+        img = load_image(join(img_dir, name))
+        img = pad_image(img)
+        imgs.append(img)
+
+        pose = load_image(join(pose_dir, name))
+        pose = pad_image(pose, 0)
+        pose_list.append(pose)
 
     ref_name = video_list[random.choice(samples_idx)]
     reference_image = load_image(join(img_dir, ref_name))
     reference_image = pad_image(reference_image)
 
-    return reference_image, pose, img
+    return reference_image, pose_list, imgs
 
 
 if __name__ == '__main__':
@@ -104,10 +111,12 @@ if __name__ == '__main__':
         else:
             video_to_image[video_name].append(name)
 
+    motion_adapter = MotionAdapter.from_pretrained(motion_adapter_model_path)
     controlnet = ControlNetModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
     referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
-    pipe = VIPAnimateImagePipeline.from_pretrained(
+    pipe = VIPAnimateVideoPipeline.from_pretrained(
         base_path,
+        motion_adapter=motion_adapter,
         controlnet=controlnet,
         referencenet=referencenet,
         torch_dtype=dtype).to(device)
@@ -119,23 +128,29 @@ if __name__ == '__main__':
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
-        reference, pose, gt_img = get_reference_pose_frame(v)
+        reference, pose, gt_img = get_reference_pose_frames(v)
         out = pipe(
-            prompt="woman posing for a photo, simple white background",
+            prompt="",
+            num_frames=num_frames,
             reference_image=reference,
-            control_image=pose,
+            control_images=pose,
             height=512,
             width=512,
             num_inference_steps=25,
             guidance_scale=1.0,
             negative_prompt="",
-            num_images_per_prompt=1,
+            num_videos_per_prompt=1,
             generator=generator,
         )
-        out_img = np.concatenate(
-            [reference.resize((512, 512), 1), pose.resize((512, 512), 1),
-             gt_img.resize((512, 512), 1), out[0]], axis=1)
-        Image.fromarray(out_img).save(join(out_dir, k + '.png'))
+        out_gifs = []
+        reference = reference.resize((512, 512), 1)
+        for out_img, gt, pose_img in zip(out[0], gt_img, pose):
+            out_gif = np.concatenate(
+                [reference, pose_img.resize((512, 512), 1),
+                 gt.resize((512, 512), 1), out_img], axis=1
+            )
+            out_gifs.append(Image.fromarray(out_gif))
+        export_to_gif(out_gifs, join(out_dir, k + '.gif'))
         ind += 1
 
     print('Done!')
