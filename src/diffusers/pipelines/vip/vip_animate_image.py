@@ -39,7 +39,6 @@ from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
-from diffusers.models.pose_guider import PoseGuider
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -76,11 +75,6 @@ def tensor2vid(video: torch.Tensor, processor, output_type="np"):
     return outputs
 
 
-@dataclass
-class AnimateDiffPipelineOutput(BaseOutput):
-    frames: Union[torch.Tensor, np.ndarray]
-
-
 class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
 
@@ -101,7 +95,6 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         feature_extractor=None,
         image_encoder=None,
         controlnet: ControlNetModel = None,
-        pose_guider: PoseGuider = None,
         referencenet: ReferenceNetModel = None,
     ):
         super().__init__()
@@ -112,12 +105,11 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
-            feature_extractor=feature_extractor,
-            image_encoder=image_encoder,
             controlnet=controlnet,
-            pose_guider=pose_guider,
             referencenet=referencenet,
         )
+        self.feature_extractor = feature_extractor,
+        self.image_encoder = image_encoder,
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(
@@ -438,7 +430,6 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
-        return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = {},
@@ -502,14 +493,16 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             prompt_embeds.dtype,
             do_classifier_free_guidance
         )
-        if self.pose_guider is not None:
-            pose_latents = self.pose_guider(control_image)
 
         # Prepare reference latents
         reference_image = reference_image.resize((width, height), 1)
-        uncond_image = Image.new("RGB", reference_image.size)
+        if do_classifier_free_guidance:
+            uncond_image = Image.new("RGB", reference_image.size)
+
         reference_image = Normalize([0.5], [0.5], inplace=True)(ToTensor()(reference_image)).unsqueeze(0).repeat_interleave(num_images_per_prompt, dim=0)
-        uncond_image = Normalize([0.5], [0.5], inplace=True)(ToTensor()(uncond_image)).unsqueeze(0).repeat_interleave(num_images_per_prompt, dim=0)
+        if do_classifier_free_guidance:
+            uncond_image = Normalize([0.5], [0.5], inplace=True)(ToTensor()(uncond_image)).unsqueeze(0).repeat_interleave(num_images_per_prompt, dim=0)
+
         reference_image = torch.cat([uncond_image, reference_image]) if do_classifier_free_guidance else reference_image
         reference_latents = self._encode_vae_image(reference_image.to(device, dtype=prompt_embeds.dtype), generator)
 
@@ -536,7 +529,7 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
                 # predict the noise residual
                 noise_pred = self.unet(
-                    latent_model_input + pose_latents if self.pose_guider is not None else latent_model_input,
+                    latent_model_input,
                     t,
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
