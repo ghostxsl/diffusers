@@ -31,10 +31,9 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
+from PIL import Image
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, CLIPTextModel, CLIPImageProcessor, CLIPVisionModelWithProjection
-from peft import LoraConfig, get_peft_model_state_dict
-from safetensors.torch import load_file, save_file
+from transformers import AutoTokenizer, CLIPTextModel
 
 import diffusers
 from diffusers import (
@@ -42,67 +41,28 @@ from diffusers import (
     ControlNetModel,
     DDPMScheduler,
     UNet2DConditionModel,
-    StableDiffusionPipeline
+    MotionAdapter,
+    UNetMotionModel,
 )
-from diffusers.models.attention_processor import (
-    AttnProcessor,
-    AttnProcessor2_0,
-    IPAdapterAttnProcessor,
-    IPAdapterAttnProcessor2_0,
-)
-from diffusers.models.embeddings import Resampler
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.loaders import LoraLoaderMixin
 from diffusers.data import AnimateAnyoneDataset, animate_collate_fn
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.pose_guider import PoseGuider
 
 
 logger = get_logger(__name__)
 
 
-def get_module_kohya_state_dict(module,
-                                prefix,
-                                dtype=torch.float32,
-                                adapter_name="default"):
-    kohya_ss_state_dict = {}
-    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
-        kohya_key = prefix + "." + peft_key
-        kohya_key = kohya_key.replace("lora_A", "lora_down")
-        kohya_key = kohya_key.replace("lora_B", "lora_up")
-        kohya_key = kohya_key.replace(".", "_", kohya_key.count(".") - 2)
-        kohya_ss_state_dict[kohya_key] = weight.to(dtype)
-
-        # Set alpha parameter
-        if "lora_down" in kohya_key:
-            alpha_key = f'{kohya_key.split(".")[0]}.alpha'
-            kohya_ss_state_dict[alpha_key] = torch.tensor(module.peft_config[adapter_name].lora_alpha).to(dtype)
-
-    return kohya_ss_state_dict
-
-
-def get_ip_adapter_state_dict(unet, dtype=torch.float32):
-
-    ip_adapter_state_dict = {}
-    for processor_key, attn_processor in unet.attn_processors.items():
-        if hasattr(attn_processor, "state_dict"):
-            for parameter_key, parameter in attn_processor.state_dict().items():
-                ip_adapter_state_dict[f"{processor_key}.{parameter_key}"] = parameter.to(dtype)
-
-    for k, parameter in unet.encoder_hid_proj.state_dict().items():
-        ip_adapter_state_dict[f"encoder_hid_proj.{k}"] = parameter.to(dtype)
-
-    return ip_adapter_state_dict
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Simple example of a Animate training script.")
+    parser = argparse.ArgumentParser(description="Simple example of a ControlNet training script.")
     parser.add_argument(
         "--pretrained_model_path",
         type=str,
         default=None,
         required=True,
+        help="Path to pretrained model.",
     )
     parser.add_argument(
         "--controlnet_model_path",
@@ -115,12 +75,7 @@ def parse_args():
         default=None,
     )
     parser.add_argument(
-        "--ip_adapter_model_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--image_encoder_model_path",
+        "--motion_adapter_model_path",
         type=str,
         default=None,
     )
@@ -162,12 +117,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--drop_text",
-        type=float,
-        default=0.1,
-        help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -183,9 +132,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--num_frames",
+        type=int,
+        default=24,
     )
-    parser.add_argument("--num_train_epochs", type=int, default=60)
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
+    )
+    parser.add_argument("--num_train_epochs", type=int, default=160)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -246,7 +205,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=50, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -312,21 +271,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=64,
-        help="The rank of the LoRA projection matrix.",
-    )
-    parser.add_argument(
-        "--lora_alpha",
-        type=int,
-        default=8,
-        help="The rank of the LoRA projection matrix.",
+        "--drop_text",
+        type=float,
+        default=0.1,
+        help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
     )
     parser.add_argument(
         "--tracker_project_name",
         type=str,
-        default="train_animate",
+        default="train_controlnet",
         help=(
             "The `project_name` argument passed to Accelerator.init_trackers for"
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
@@ -337,7 +290,7 @@ def parse_args():
 
     if args.resolution % 8 != 0:
         raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
+            "`--resolution` must be divisible by 8 for consistently sized encoded images in the VAE."
         )
 
     return args
@@ -373,8 +326,7 @@ def main(args):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+        os.makedirs(args.output_dir, exist_ok=True)
 
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -384,48 +336,17 @@ def main(args):
                 while len(weights) > 0:
                     weights.pop()
                     model = models.pop()
-                    if isinstance(model, UNet2DConditionModel):
-                        # save lora
-                        lora_state_dict = get_module_kohya_state_dict(model, "lora_unet", torch.float32)
-                        os.makedirs(join(output_dir, "lora_unet"), exist_ok=True)
-                        save_file(lora_state_dict, join(
-                            output_dir, "lora_unet", "pytorch_lora_weights.safetensors"))
 
-                        # save ip_adapter
-                        ip_adapter_state_dict = get_ip_adapter_state_dict(model, torch.float32)
-                        os.makedirs(join(output_dir, "ip_adapter"), exist_ok=True)
-                        save_file(ip_adapter_state_dict, join(
-                            output_dir, "ip_adapter", "pytorch_ip_adapter_weights.safetensors"))
-                        continue
-                    elif isinstance(model, ControlNetModel):
-                        sub_dir = "controlnet"
-                    else:
-                        sub_dir = "referencenet"
-                    model.save_pretrained(join(output_dir, sub_dir))
+                    sub_dir = "motion_adapter"
+                    model.save_motion_modules(join(output_dir, sub_dir))
 
         def load_model_hook(models, input_dir):
             while len(models) > 0:
                 # pop models so that they are not loaded again
                 model = models.pop()
 
-                if isinstance(model, UNet2DConditionModel):
-                    # load lora
-                    lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(
-                        input_dir, subfolder="lora_unet")
-                    LoraLoaderMixin.load_lora_into_unet(
-                        lora_state_dict, network_alphas=network_alphas, unet=model)
-
-                    # load ip_adapter
-                    ip_adapter_state_dict = load_file(join(input_dir, "ip_adapter", "pytorch_ip_adapter_weights.safetensors"))
-                    model.load_state_dict(ip_adapter_state_dict, strict=False)
-                    continue
-                elif isinstance(model, ControlNetModel):
-                    # load diffusers style into model
-                    load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
-                else:
-                    load_model = ReferenceNetModel.from_pretrained(input_dir, subfolder="referencenet")
-                model.register_to_config(**load_model.config)
-                model.load_state_dict(load_model.state_dict())
+                load_model = MotionAdapter.from_pretrained(input_dir, subfolder="motion_adapter")
+                model.load_motion_modules(load_model)
                 del load_model
 
         accelerator.register_save_state_pre_hook(save_model_hook)
@@ -440,38 +361,31 @@ def main(args):
     # import correct text encoder class
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
 
-    # import correct image encoder class
-    image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_model_path)
-    feature_extractor = CLIPImageProcessor()
-
     # Load scheduler and models
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
+
+    # Load motion adapter
+    motion_adapter = MotionAdapter.from_pretrained(args.motion_adapter_model_path)
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_path,
         subfolder="unet",
     )
+    unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
 
     # Load ControlNet
-    if args.controlnet_model_path:
-        logger.info("Loading existing controlnet weights")
-        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_path)
-    else:
-        logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetModel.from_unet(unet)
+    logger.info("Loading existing controlnet weights")
+    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_path)
 
     # Load ReferenceNet
-    if args.referencenet_model_path:
-        logger.info("Loading existing referencenet weights")
-        referencenet = ReferenceNetModel.from_pretrained(args.referencenet_model_path)
-    else:
-        logger.info("Initializing referencenet weights from unet")
-        referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
+    logger.info("Loading existing referencenet weights")
+    referencenet = ReferenceNetModel.from_pretrained(args.referencenet_model_path)
 
     text_encoder.requires_grad_(False)
-    image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
-    unet.requires_grad_(False)
+    controlnet.requires_grad_(False)
+    referencenet.requires_grad_(False)
+    unet.freeze_unet2d_params()
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -483,87 +397,9 @@ def main(args):
 
     # Move vae, unet and text_encoder to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
-
-    # Add LoRA to the student U-Net, only the LoRA projection matrix will be updated by the optimizer.
-    lora_config = LoraConfig(
-        r=args.lora_rank,
-        target_modules=[
-            "to_q",
-            "to_k",
-            "to_v",
-            "to_out.0",
-            "proj_in",
-            "proj_out",
-            "ff.net.0.proj",
-            "ff.net.2",
-            "conv1",
-            "conv2",
-            "conv_shortcut",
-            "downsamplers.0.conv",
-            "upsamplers.0.conv",
-        ],
-        lora_alpha=args.lora_alpha,
-    )
-    # Add adapter and make sure the trainable params are in float32.
-    unet.add_adapter(lora_config)
-    # Add IP-Adapter
-    if args.ip_adapter_model_path is not None:
-        ip_adapter_state_dict = torch.load(args.ip_adapter_model_path, map_location='cpu')
-        unet._load_ip_adapter_weights(ip_adapter_state_dict)
-    else:
-        num_image_text_embeds = 16
-        unet.encoder_hid_proj = None
-
-        # set ip-adapter cross-attention processors
-        attn_procs = {}
-        for name in unet.attn_processors.keys():
-            cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
-            if name.startswith("mid_block"):
-                hidden_size = unet.config.block_out_channels[-1]
-            elif name.startswith("up_blocks"):
-                block_id = int(name[len("up_blocks.")])
-                hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-            elif name.startswith("down_blocks"):
-                block_id = int(name[len("down_blocks.")])
-                hidden_size = unet.config.block_out_channels[block_id]
-            if cross_attention_dim is None or "motion_modules" in name:
-                attn_processor_class = (
-                    AttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else AttnProcessor
-                )
-                attn_procs[name] = attn_processor_class()
-            else:
-                attn_processor_class = (
-                    IPAdapterAttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else IPAdapterAttnProcessor
-                )
-                attn_procs[name] = attn_processor_class(
-                    hidden_size=hidden_size,
-                    cross_attention_dim=cross_attention_dim,
-                    scale=1.0,
-                    num_tokens=num_image_text_embeds,
-                ).to(dtype=unet.dtype, device=unet.device)
-
-        unet.set_attn_processor(attn_procs)
-
-        # convert IP-Adapter Image Projection layers to diffusers
-        image_projection = Resampler(
-            embed_dims=1280,
-            output_dims=768,
-            hidden_dims=768,
-            heads=12,
-            num_queries=num_image_text_embeds,
-        )
-
-        unet.encoder_hid_proj = image_projection.to(device=unet.device, dtype=unet.dtype)
-        unet.config.encoder_hid_dim_type = "ip_image_proj"
-
-    if args.mixed_precision == "fp16":
-        for param in unet.parameters():
-            # only upcast trainable parameters (LoRA) into fp32
-            if param.requires_grad:
-                param.data = param.data.to(torch.float32)
+    controlnet.to(accelerator.device, dtype=weight_dtype)
+    referencenet.to(accelerator.device, dtype=weight_dtype)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -581,8 +417,7 @@ def main(args):
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
-        referencenet.enable_gradient_checkpointing()
+        unet.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -608,13 +443,7 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_clip = list(controlnet.parameters()) + list(
-        referencenet.parameters()) + [p for p in unet.parameters() if p.requires_grad]
-    params_to_optimize = [
-        {"params": list(referencenet.parameters())},
-        {"params": [p for p in unet.parameters() if p.requires_grad]},
-        {"params": list(controlnet.parameters()), "lr": 1e-6}
-    ]
+    params_to_optimize = [p for p in list(unet.parameters()) if p.requires_grad]
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -629,9 +458,11 @@ def main(args):
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
-        clip_processor=feature_extractor,
         img_size=args.resolution,
-        drop_text=args.drop_text
+        drop_text=args.drop_text,
+        num_frames=args.num_frames,
+        stride=args.stride,
+        is_video=True,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -666,8 +497,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
+    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -681,6 +512,7 @@ def main(args):
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
+
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     # Train!
@@ -732,18 +564,15 @@ def main(args):
     )
 
     unet.train()
-    controlnet.train()
-    referencenet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet, controlnet, referencenet):
+            with accelerator.accumulate(unet):
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                latents = vae.encode(
+                    batch["pixel_values"].reshape([-1,] + list(batch["pixel_values"].shape[-3:])).to(
+                        dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
-
-                # reference image latents
-                reference_latents = vae.encode(batch["reference_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                reference_latents = reference_latents * vae.config.scaling_factor
+                latents = latents.reshape([-1, args.num_frames] + list(latents.shape[-3:]))
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
@@ -758,17 +587,22 @@ def main(args):
 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-                image_embeds = image_encoder(batch["reference_image"].to(dtype=weight_dtype), output_hidden_states=True).hidden_states[-2]
 
                 # run controlnet
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                controlnet_image = controlnet_image.reshape([-1, ] + list(controlnet_image.shape[-3:]))
                 down_block_res_samples, mid_block_res_sample = controlnet(
-                    noisy_latents,
+                    noisy_latents.reshape([-1, ] + list(noisy_latents.shape[-3:])),
                     timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states.repeat_interleave(args.num_frames, dim=0),
                     controlnet_cond=controlnet_image,
                     return_dict=False,
                 )
+
+                # reference image latents
+                reference_latents = vae.encode(
+                    batch["reference_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                reference_latents = reference_latents * vae.config.scaling_factor
 
                 referencenet(reference_latents, timesteps, encoder_hidden_states)
                 reference_control_reader.update(reference_control_writer, dtype=weight_dtype)
@@ -776,10 +610,9 @@ def main(args):
 
                 # Predict the noise residual
                 model_pred = unet(
-                    noisy_latents,
+                    noisy_latents.transpose(1, 2),
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs={"image_embeds": image_embeds},
                     down_block_additional_residuals=[
                         sample.to(dtype=weight_dtype) for sample in down_block_res_samples
                     ],
@@ -794,11 +627,11 @@ def main(args):
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                loss = F.mse_loss(model_pred.float(), target.transpose(1, 2).float(), reduction="mean")
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
@@ -845,17 +678,7 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
-        save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
-
-        ip_adapter_state_dict = get_ip_adapter_state_dict(unet, torch.float32)
-        save_file(ip_adapter_state_dict, join(args.output_dir, "pytorch_ip_adapter_weights.safetensors"))
-
-        controlnet = accelerator.unwrap_model(controlnet)
-        controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
-
-        referencenet = accelerator.unwrap_model(referencenet)
-        referencenet.save_pretrained(os.path.join(args.output_dir, "referencenet"))
+        unet.save_motion_modules(os.path.join(args.output_dir, "motion_adapter"))
 
     accelerator.end_training()
 
