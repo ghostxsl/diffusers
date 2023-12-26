@@ -151,9 +151,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=60)
+    parser.add_argument("--num_train_epochs", type=int, default=120)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -280,18 +280,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=64,
-        help="The rank of the LoRA projection matrix.",
-    )
-    parser.add_argument(
-        "--lora_alpha",
-        type=int,
-        default=8,
-        help="The rank of the LoRA projection matrix.",
-    )
-    parser.add_argument(
         "--tracker_project_name",
         type=str,
         default="train_animate",
@@ -352,14 +340,8 @@ def main(args):
                 while len(weights) > 0:
                     weights.pop()
                     model = models.pop()
-                    if isinstance(model, UNet2DConditionModel):
-                        sub_dir = "lora_unet"
-                        lora_state_dict = get_module_kohya_state_dict(model, "lora_unet", torch.float32)
-                        os.makedirs(join(output_dir, sub_dir), exist_ok=True)
-                        save_file(lora_state_dict, join(
-                            output_dir, sub_dir, "pytorch_lora_weights.safetensors"))
-                        continue
-                    elif isinstance(model, ControlNetModel):
+
+                    if isinstance(model, ControlNetModel):
                         sub_dir = "controlnet"
                     else:
                         sub_dir = "referencenet"
@@ -370,17 +352,11 @@ def main(args):
                 # pop models so that they are not loaded again
                 model = models.pop()
 
-                if isinstance(model, UNet2DConditionModel):
-                    lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(
-                        input_dir, subfolder="lora_unet")
-                    LoraLoaderMixin.load_lora_into_unet(
-                        lora_state_dict, network_alphas=network_alphas, unet=model)
-                    continue
-                elif isinstance(model, ControlNetModel):
+                if isinstance(model, ControlNetModel):
                     # load diffusers style into model
                     load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
                 else:
-                    load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="referencenet")
+                    load_model = ReferenceNetModel.from_pretrained(input_dir, subfolder="referencenet")
                 model.register_to_config(**load_model.config)
                 model.load_state_dict(load_model.state_dict())
                 del load_model
@@ -400,10 +376,7 @@ def main(args):
     # Load scheduler and models
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_path,
-        subfolder="unet",
-    )
+    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
     # Load ControlNet
     if args.controlnet_model_path:
@@ -437,34 +410,6 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-
-    # Add LoRA to the student U-Net, only the LoRA projection matrix will be updated by the optimizer.
-    lora_config = LoraConfig(
-        r=args.lora_rank,
-        target_modules=[
-            "to_q",
-            "to_k",
-            "to_v",
-            "to_out.0",
-            "proj_in",
-            "proj_out",
-            "ff.net.0.proj",
-            "ff.net.2",
-            "conv1",
-            "conv2",
-            "conv_shortcut",
-            "downsamplers.0.conv",
-            "upsamplers.0.conv",
-        ],
-        lora_alpha=args.lora_alpha,
-    )
-    # Add adapter and make sure the trainable params are in float32.
-    unet.add_adapter(lora_config)
-    if args.mixed_precision == "fp16":
-        for param in unet.parameters():
-            # only upcast trainable parameters (LoRA) into fp32
-            if param.requires_grad:
-                param.data = param.data.to(torch.float32)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -509,11 +454,9 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_clip = list(controlnet.parameters()) + list(
-        referencenet.parameters()) + [p for p in unet.parameters() if p.requires_grad]
+    params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
     params_to_optimize = [
         {"params": list(referencenet.parameters())},
-        {"params": [p for p in unet.parameters() if p.requires_grad]},
         {"params": list(controlnet.parameters()), "lr": 1e-6}
     ]
     optimizer = optimizer_class(
@@ -566,8 +509,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
+    controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -631,12 +574,11 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    unet.train()
     controlnet.train()
     referencenet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet, controlnet, referencenet):
+            with accelerator.accumulate(controlnet, referencenet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
@@ -742,10 +684,6 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unet = accelerator.unwrap_model(unet)
-        lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
-        save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
-
         controlnet = accelerator.unwrap_model(controlnet)
         controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
 
