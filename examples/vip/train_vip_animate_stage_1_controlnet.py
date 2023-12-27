@@ -279,15 +279,6 @@ def parse_args():
             " https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html"
         ),
     )
-    parser.add_argument(
-        "--tracker_project_name",
-        type=str,
-        default="train_animate",
-        help=(
-            "The `project_name` argument passed to Accelerator.init_trackers for"
-            " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
-        ),
-    )
 
     args = parser.parse_args()
 
@@ -457,7 +448,7 @@ def main(args):
     params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
     params_to_optimize = [
         {"params": list(referencenet.parameters())},
-        {"params": list(controlnet.parameters()), "lr": 1e-6}
+        {"params": list(controlnet.parameters()), "lr": args.learning_rate / 10}
     ]
     optimizer = optimizer_class(
         params_to_optimize,
@@ -487,10 +478,7 @@ def main(args):
         pin_memory=True,
     )
 
-    reference_control_writer = ReferenceAttentionControl(
-        referencenet, mode='write', fusion_blocks='full')
-    reference_control_reader = ReferenceAttentionControl(
-        unet, mode='read', fusion_blocks='full')
+    reference_control_reader = ReferenceAttentionControl(unet, fusion_blocks='full')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -519,12 +507,6 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
-    # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process:
-        tracker_config = dict(vars(args))
-        accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes
@@ -612,8 +594,7 @@ def main(args):
                 )
 
                 referencenet(reference_latents, timesteps, encoder_hidden_states)
-                reference_control_reader.update(reference_control_writer, dtype=weight_dtype)
-                reference_control_writer.clear()
+                reference_control_reader.update(referencenet, dtype=weight_dtype)
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -625,7 +606,7 @@ def main(args):
                     ],
                     mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                 ).sample
-                reference_control_reader.clear()
+                # reference_control_reader.clear()
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":

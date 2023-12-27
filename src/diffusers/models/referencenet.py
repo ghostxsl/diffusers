@@ -37,7 +37,7 @@ from .embeddings import (
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
-    PositionNet,
+    GLIGENTextBoundingboxProjection,
     TextImageProjection,
     TextImageTimeEmbedding,
     TextTimeEmbedding,
@@ -52,6 +52,7 @@ from .unet_2d_blocks import (
     get_down_block,
     get_up_block,
 )
+from .transformer_2d import Transformer2DModelOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -477,6 +478,8 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
                 dropout=dropout,
             )
+            if hasattr(down_block, 'attentions'):
+                down_block.attentions = nn.ModuleList([AttnIdentity() for _ in down_block.attentions])
             self.down_blocks.append(down_block)
 
         # mid
@@ -531,6 +534,9 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             self.mid_block = None
         else:
             raise ValueError(f"unknown mid_block_type : {mid_block_type}")
+
+        if self.mid_block is not None and hasattr(self.mid_block, 'attentions'):
+            self.mid_block.attentions = nn.ModuleList([AttnIdentity() for _ in self.mid_block.attentions])
 
         # count how many layers upsample the images
         self.num_upsamplers = 0
@@ -589,16 +595,18 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
                 dropout=dropout,
             )
+            if hasattr(up_block, 'attentions'):
+                up_block.attentions = nn.ModuleList([AttnIdentity() for _ in up_block.attentions])
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
 
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].is_final_block = True
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn1 = None
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm2 = nn.Identity()
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn2 = None
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm3 = nn.Identity()
-        self.up_blocks[-1].attentions[-1].transformer_blocks[0].ff = nn.Identity()
-        self.up_blocks[-1].attentions[-1].proj_out = nn.Identity()
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].is_final_block = True
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn1 = None
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm2 = nn.Identity()
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn2 = None
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm3 = nn.Identity()
+        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].ff = nn.Identity()
+        # self.up_blocks[-1].attentions[-1].proj_out = nn.Identity()
 
         if attention_type in ["gated", "gated-text-image"]:
             positive_len = 768
@@ -608,7 +616,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 positive_len = cross_attention_dim[0]
 
             feature_type = "text-only" if attention_type == "gated" else "text-image"
-            self.position_net = PositionNet(
+            self.position_net = GLIGENTextBoundingboxProjection(
                 positive_len=positive_len, out_dim=cross_attention_dim, feature_type=feature_type
             )
 
@@ -1194,3 +1202,16 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             return (sample,)
 
         return UNet2DConditionOutput(sample=sample)
+
+
+class AttnIdentity(nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+
+    def forward(self, input, *args, **kwargs):
+        self.bank = input.reshape(list(input.shape[:2]) + [-1,]).transpose(1, 2)
+        return_dict = kwargs.get("return_dict", False)
+        if not return_dict:
+            return (input, )
+        else:
+            return Transformer2DModelOutput(sample=input)

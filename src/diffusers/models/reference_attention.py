@@ -13,16 +13,19 @@
 import torch
 from typing import Any, Dict, Optional
 
-from diffusers.models.attention import BasicTransformerBlock
+from diffusers.models.attention import BasicTransformerBlock, _chunked_feed_forward
 from diffusers.models.unet_3d_blocks import TransformerTemporalModel
+from diffusers.models.referencenet import AttnIdentity
 
 
-def torch_attn_dfs(model: torch.nn.Module, prefix=""):
+def torch_attn_dfs(model, prefix=""):
     result = []
     for name, child in model.named_children():
         if name == 'motion_modules' or isinstance(child, TransformerTemporalModel):
             continue
         elif isinstance(child, BasicTransformerBlock):
+            result.append([prefix + f".{name}", child])
+        elif isinstance(child, AttnIdentity):
             result.append([prefix + f".{name}", child])
         else:
             result += torch_attn_dfs(child, prefix=prefix + f".{name}")
@@ -30,110 +33,101 @@ def torch_attn_dfs(model: torch.nn.Module, prefix=""):
 
 
 class ReferenceAttentionControl(object):
-    def __init__(self,
-                 unet,
-                 mode,
-                 fusion_blocks="full",
-                 ):
+    def __init__(self, unet, fusion_blocks="full"):
+        assert fusion_blocks in ["midup", "full"]
+
         # Modify self attention
         self.unet = unet
-        assert mode in ["read", "write"]
-        assert fusion_blocks in ["midup", "full"]
         self.fusion_blocks = fusion_blocks
-        self.register_reference_hooks(mode)
+        self.register_reference_hooks()
 
-    def register_reference_hooks(self, mode):
-        MODE = mode
+    def register_reference_hooks(self):
 
         def hacked_basic_transformer_inner_forward(
-                self,
-                hidden_states: torch.FloatTensor,
-                attention_mask: Optional[torch.FloatTensor] = None,
-                encoder_hidden_states: Optional[torch.FloatTensor] = None,
-                encoder_attention_mask: Optional[torch.FloatTensor] = None,
-                timestep: Optional[torch.LongTensor] = None,
-                cross_attention_kwargs: Dict[str, Any] = None,
-                class_labels: Optional[torch.LongTensor] = None,
-                # video_length=None,
-        ):
+            self,
+            hidden_states: torch.FloatTensor,
+            attention_mask: Optional[torch.FloatTensor] = None,
+            encoder_hidden_states: Optional[torch.FloatTensor] = None,
+            encoder_attention_mask: Optional[torch.FloatTensor] = None,
+            timestep: Optional[torch.LongTensor] = None,
+            cross_attention_kwargs: Dict[str, Any] = None,
+            class_labels: Optional[torch.LongTensor] = None,
+            added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
+        ) -> torch.FloatTensor:
+            # Notice that normalization is always applied before the real computation in the following blocks.
+            # 0. Self-Attention
+            batch_size = hidden_states.shape[0]
+
             if self.use_ada_layer_norm:
                 norm_hidden_states = self.norm1(hidden_states, timestep)
             elif self.use_ada_layer_norm_zero:
                 norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
                     hidden_states, timestep, class_labels, hidden_dtype=hidden_states.dtype
                 )
-            else:
+            elif self.use_layer_norm:
                 norm_hidden_states = self.norm1(hidden_states)
-
-            # 1. Self-Attention
-            cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
-            if self.only_cross_attention:
-                attn_output = self.attn1(
-                    norm_hidden_states,
-                    encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
-                    attention_mask=attention_mask,
-                    **cross_attention_kwargs,
-                )
+            elif self.use_ada_layer_norm_continuous:
+                norm_hidden_states = self.norm1(hidden_states, added_cond_kwargs["pooled_text_emb"])
+            elif self.use_ada_layer_norm_single:
+                shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                    self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
+                ).chunk(6, dim=1)
+                norm_hidden_states = self.norm1(hidden_states)
+                norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+                norm_hidden_states = norm_hidden_states.squeeze(1)
             else:
-                if MODE == "write":
-                    self.bank = norm_hidden_states
-                    if hasattr(self, 'is_final_block') and self.is_final_block:
-                        return norm_hidden_states
-                    attn_output = self.attn1(
-                        norm_hidden_states,
-                        encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
-                        attention_mask=attention_mask,
-                        **cross_attention_kwargs,
-                    )
-                elif MODE == "read":
-                    if norm_hidden_states.shape[0] != self.bank.shape[0]:
-                        self.bank = self.bank.repeat_interleave(
-                            repeats=norm_hidden_states.shape[0], dim=0)
-                    hidden_states = self.attn1(norm_hidden_states,
-                                               encoder_hidden_states=torch.cat(
-                                                   [norm_hidden_states, self.bank], dim=1),
-                                               attention_mask=attention_mask) + hidden_states
+                raise ValueError("Incorrect norm used")
 
-                    if self.attn2 is not None:
-                        # Cross-Attention
-                        norm_hidden_states = (
-                            self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(
-                                hidden_states)
-                        )
-                        hidden_states = (
-                                self.attn2(
-                                    norm_hidden_states, encoder_hidden_states=encoder_hidden_states,
-                                    attention_mask=attention_mask
-                                )
-                                + hidden_states
-                        )
+            if self.pos_embed is not None:
+                norm_hidden_states = self.pos_embed(norm_hidden_states)
 
-                    # Feed-forward
-                    hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
+            # 1. Retrieve lora scale.
+            lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
 
-                    # Temporal-Attention
-                    # if self.unet_use_temporal_attention:
-                    #     d = hidden_states.shape[1]
-                    #     hidden_states = rearrange(hidden_states, "(b f) d c -> (b d) f c", f=video_length)
-                    #     norm_hidden_states = (
-                    #         self.norm_temp(hidden_states, timestep) if self.use_ada_layer_norm else self.norm_temp(
-                    #             hidden_states)
-                    #     )
-                    #     hidden_states = self.attn_temp(norm_hidden_states) + hidden_states
-                    #     hidden_states = rearrange(hidden_states, "(b d) f c -> (b f) d c", d=d)
+            # 2. Prepare GLIGEN inputs
+            cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+            gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
 
-                    return hidden_states
-
+            if norm_hidden_states.shape[0] != self.bank.shape[0]:
+                self.bank = self.bank.repeat_interleave(repeats=norm_hidden_states.shape[0], dim=0)
+            attn_output = self.attn1(
+                norm_hidden_states,
+                encoder_hidden_states=encoder_hidden_states if self.only_cross_attention\
+                    else torch.cat([norm_hidden_states, self.bank], dim=1),
+                attention_mask=attention_mask,
+                **cross_attention_kwargs,
+            )
             if self.use_ada_layer_norm_zero:
                 attn_output = gate_msa.unsqueeze(1) * attn_output
+            elif self.use_ada_layer_norm_single:
+                attn_output = gate_msa * attn_output
+
             hidden_states = attn_output + hidden_states
+            if hidden_states.ndim == 4:
+                hidden_states = hidden_states.squeeze(1)
 
+            # 2.5 GLIGEN Control
+            if gligen_kwargs is not None:
+                hidden_states = self.fuser(hidden_states, gligen_kwargs["objs"])
+
+            # 3. Cross-Attention
             if self.attn2 is not None:
-                norm_hidden_states = (
-                    self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
-                )
+                if self.use_ada_layer_norm:
+                    norm_hidden_states = self.norm2(hidden_states, timestep)
+                elif self.use_ada_layer_norm_zero or self.use_layer_norm:
+                    norm_hidden_states = self.norm2(hidden_states)
+                elif self.use_ada_layer_norm_single:
+                    # For PixArt norm2 isn't applied here:
+                    # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L70C1-L76C103
+                    norm_hidden_states = hidden_states
+                elif self.use_ada_layer_norm_continuous:
+                    norm_hidden_states = self.norm2(hidden_states, added_cond_kwargs["pooled_text_emb"])
+                else:
+                    raise ValueError("Incorrect norm")
 
-                # 2. Cross-Attention
+                if self.pos_embed is not None and self.use_ada_layer_norm_single is False:
+                    norm_hidden_states = self.pos_embed(norm_hidden_states)
+
                 attn_output = self.attn2(
                     norm_hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
@@ -142,18 +136,35 @@ class ReferenceAttentionControl(object):
                 )
                 hidden_states = attn_output + hidden_states
 
-            # 3. Feed-forward
-            norm_hidden_states = self.norm3(hidden_states)
+            # 4. Feed-forward
+            if self.use_ada_layer_norm_continuous:
+                norm_hidden_states = self.norm3(hidden_states, added_cond_kwargs["pooled_text_emb"])
+            elif not self.use_ada_layer_norm_single:
+                norm_hidden_states = self.norm3(hidden_states)
 
             if self.use_ada_layer_norm_zero:
                 norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
 
-            ff_output = self.ff(norm_hidden_states)
+            if self.use_ada_layer_norm_single:
+                norm_hidden_states = self.norm2(hidden_states)
+                norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+
+            if self._chunk_size is not None:
+                # "feed_forward_chunk_size" can be used to save memory
+                ff_output = _chunked_feed_forward(
+                    self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size, lora_scale=lora_scale
+                )
+            else:
+                ff_output = self.ff(norm_hidden_states, scale=lora_scale)
 
             if self.use_ada_layer_norm_zero:
                 ff_output = gate_mlp.unsqueeze(1) * ff_output
+            elif self.use_ada_layer_norm_single:
+                ff_output = gate_mlp * ff_output
 
             hidden_states = ff_output + hidden_states
+            if hidden_states.ndim == 4:
+                hidden_states = hidden_states.squeeze(1)
 
             return hidden_states
 
@@ -167,13 +178,13 @@ class ReferenceAttentionControl(object):
             module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
             module.bank = None
 
-    def update(self, writer, dtype=torch.float32):
+    def update(self, referencenet, dtype=torch.float32):
         if self.fusion_blocks == "midup":
             reader_attn_modules = torch_attn_dfs(self.unet.mid_block) + torch_attn_dfs(self.unet.up_blocks)
-            writer_attn_modules = torch_attn_dfs(writer.unet.mid_block) + torch_attn_dfs(writer.unet.up_blocks)
+            writer_attn_modules = torch_attn_dfs(referencenet.mid_block) + torch_attn_dfs(referencenet.up_blocks)
         elif self.fusion_blocks == "full":
             reader_attn_modules = torch_attn_dfs(self.unet)
-            writer_attn_modules = torch_attn_dfs(writer.unet)
+            writer_attn_modules = torch_attn_dfs(referencenet)
 
         for (_, r), (_, w) in zip(reader_attn_modules, writer_attn_modules):
             r.bank = w.bank.to(dtype)

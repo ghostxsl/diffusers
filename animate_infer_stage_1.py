@@ -6,7 +6,17 @@ import numpy as np
 from PIL import Image, ImageOps
 import pandas
 import torch
+import torch.nn.functional as F
+from safetensors.torch import load_file, save_file
 
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+from diffusers.models.attention_processor import (
+    AttnProcessor,
+    AttnProcessor2_0,
+    IPAdapterAttnProcessor,
+    IPAdapterAttnProcessor2_0,
+)
+from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from diffusers.pipelines.vip.vip_animate_image import VIPAnimateImagePipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from diffusers.models import ControlNetModel
@@ -28,6 +38,7 @@ pose_dir = join(root_dir, "train_png_pose")
 base_path = "/xsl/wilson.xu/weights/film"
 referencenet_model_path = "/xsl/wilson.xu/animate_film_ctrl_100/referencenet"
 controlnet_path = "/xsl/wilson.xu/animate_film_ctrl_100/controlnet"
+image_encoder_model_path = "/xsl/wilson.xu/weights/IP-Adapter/image_encoder"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -112,6 +123,57 @@ if __name__ == '__main__':
         referencenet=referencenet,
         torch_dtype=dtype).to(device)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+
+    # pipe.feature_extractor = CLIPImageProcessor()
+    # pipe.image_encoder = CLIPVisionModelWithProjection.from_pretrained(image_encoder_model_path).to(device, dtype=dtype)
+    #
+    # unet = pipe.unet
+    # num_image_text_embeds = 16
+    # unet.encoder_hid_proj = None
+    #
+    # # set ip-adapter cross-attention processors
+    # attn_procs = {}
+    # for name in unet.attn_processors.keys():
+    #     cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+    #     if name.startswith("mid_block"):
+    #         hidden_size = unet.config.block_out_channels[-1]
+    #     elif name.startswith("up_blocks"):
+    #         block_id = int(name[len("up_blocks.")])
+    #         hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+    #     elif name.startswith("down_blocks"):
+    #         block_id = int(name[len("down_blocks.")])
+    #         hidden_size = unet.config.block_out_channels[block_id]
+    #     if cross_attention_dim is None or "motion_modules" in name:
+    #         attn_processor_class = (
+    #             AttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else AttnProcessor
+    #         )
+    #         attn_procs[name] = attn_processor_class()
+    #     else:
+    #         attn_processor_class = (
+    #             IPAdapterAttnProcessor2_0 if hasattr(F, "scaled_dot_product_attention") else IPAdapterAttnProcessor
+    #         )
+    #         attn_procs[name] = attn_processor_class(
+    #             hidden_size=hidden_size,
+    #             cross_attention_dim=cross_attention_dim,
+    #             scale=1.0,
+    #             num_tokens=num_image_text_embeds,
+    #         ).to(dtype=unet.dtype, device=unet.device)
+    #
+    # unet.set_attn_processor(attn_procs)
+    #
+    # # convert IP-Adapter Image Projection layers to diffusers
+    # image_projection = IPAdapterPlusImageProjection(
+    #     embed_dims=1280,
+    #     output_dims=768,
+    #     hidden_dims=768,
+    #     heads=12,
+    #     num_queries=num_image_text_embeds,
+    # )
+    #
+    # unet.encoder_hid_proj = image_projection.to(device=unet.device, dtype=unet.dtype)
+    # unet.config.encoder_hid_dim_type = "ip_image_proj"
+    # ip_adapter_state_dict = load_file("/xsl/wilson.xu/animate_film_ip_150/pytorch_ip_adapter_weights.safetensors")
+    # unet.load_state_dict(ip_adapter_state_dict, strict=False)
 
     ind = 1
     for k, v in video_to_image.items():
