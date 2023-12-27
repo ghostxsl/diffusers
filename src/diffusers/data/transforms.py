@@ -1,5 +1,6 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import numbers
+import random
 from collections.abc import Sequence
 import numpy as np
 import cv2
@@ -8,7 +9,7 @@ from PIL import Image
 import torch
 import torchvision.transforms.functional as F
 from torchvision.utils import _log_api_usage_once
-from .utils import draw_bodypose, draw_handpose
+from .utils import draw_bodypose, draw_handpose, draw_facepose
 
 
 __all__ = [
@@ -474,13 +475,17 @@ class DrawPose(object):
                  face=True,
                  body_kpt_thr=0.3,
                  hand_kpt_thr=0.3,
-                 face_kpt_thr=0.3,):
+                 face_kpt_thr=0.3,
+                 prob_hand=0.9,
+                 prob_face=0.6):
         _log_api_usage_once(self)
         self.hand = hand
         self.face = face
         self.body_kpt_thr = body_kpt_thr
         self.hand_kpt_thr = hand_kpt_thr
         self.face_kpt_thr = face_kpt_thr
+        self.prob_hand = prob_hand
+        self.prob_face = prob_face
 
     def __call__(self, data):
         assert isinstance(data, dict)
@@ -491,10 +496,17 @@ class DrawPose(object):
             kpts = data['condition']['body']['keypoints'][..., :2] * np.array([width, height])
             kpt_valid = data['condition']['body']['keypoints'][..., 2] > self.body_kpt_thr
             canvas = draw_bodypose(canvas, kpts, kpt_valid)
-            if self.hand and data['condition']['hand'] is not None:
+
+            if self.hand and data['condition']['hand'] is not None and random.random() < self.prob_hand:
                 kpts = data['condition']['hand']['keypoints'][..., :2] * np.array([width, height])
                 kpt_valid = data['condition']['hand']['keypoints'][..., 2] > self.hand_kpt_thr
                 canvas = draw_handpose(canvas, kpts, kpt_valid)
+
+            if self.face and data['condition']['face'] is not None and random.random() < self.prob_face:
+                kpts = data['condition']['face']['keypoints'][..., :2] * np.array([width, height])
+                kpt_valid = data['condition']['face']['keypoints'][..., 2] > self.face_kpt_thr
+                canvas = draw_facepose(canvas, kpts, kpt_valid)
+
             data['condition_image'] = Image.fromarray(canvas)
         else:
             raise Exception(f"Not found keys: [`image`, `condition`]")

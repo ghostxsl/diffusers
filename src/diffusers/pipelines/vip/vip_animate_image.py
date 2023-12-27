@@ -14,14 +14,13 @@
 # limitations under the License.
 
 import inspect
-from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from torchvision.transforms import ToTensor, Normalize
 from PIL import Image
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...image_processor import VaeImageProcessor
 from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin
@@ -34,7 +33,7 @@ from ...schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from ...utils import USE_PEFT_BACKEND, BaseOutput, logging
+from ...utils import USE_PEFT_BACKEND, logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from diffusers.models.reference_attention import ReferenceAttentionControl
@@ -77,6 +76,7 @@ def tensor2vid(video: torch.Tensor, processor, output_type="np"):
 
 class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
+    _optional_components = ["feature_extractor", "image_encoder"]
 
     def __init__(
         self,
@@ -92,8 +92,8 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
-        feature_extractor=None,
-        image_encoder=None,
+        feature_extractor: Optional[CLIPImageProcessor] = None,
+        image_encoder: Optional[CLIPVisionModelWithProjection] = None,
         controlnet: ControlNetModel = None,
         referencenet: ReferenceNetModel = None,
     ):
@@ -105,11 +105,11 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             tokenizer=tokenizer,
             unet=unet,
             scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
             controlnet=controlnet,
             referencenet=referencenet,
         )
-        self.feature_extractor = feature_extractor,
-        self.image_encoder = image_encoder,
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(
@@ -211,7 +211,7 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
 
         image = image.to(device=device, dtype=dtype)
-        image_embeds = self.image_encoder(image)[0]
+        image_embeds = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
         image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
 
         if do_classifier_free_guidance:
@@ -440,10 +440,7 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        reference_control_writer = ReferenceAttentionControl(
-            self.referencenet, mode='write', fusion_blocks='full')
-        reference_control_reader = ReferenceAttentionControl(
-            self.unet, mode='read', fusion_blocks='full')
+        reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
 
         # 1. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -496,6 +493,15 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         # Prepare reference latents
         reference_image = reference_image.resize((width, height), 1)
+        if self.image_encoder is not None:
+            image_embeds, uncond_image_embeds = self.encode_image(
+                reference_image,
+                device,
+                num_images_per_prompt,
+                do_classifier_free_guidance
+            )
+            if do_classifier_free_guidance:
+                image_embeds = torch.cat([uncond_image_embeds, image_embeds])
         if do_classifier_free_guidance:
             uncond_image = Image.new("RGB", reference_image.size)
 
@@ -525,13 +531,14 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                     )
 
                 self.referencenet(reference_latents, t, encoder_hidden_states)
-                reference_control_reader.update(reference_control_writer, dtype=prompt_embeds.dtype)
+                reference_control_reader.update(self.referencenet, dtype=prompt_embeds.dtype)
 
                 # predict the noise residual
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
                     encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs={"image_embeds": image_embeds} if self.image_encoder is not None else None,
                     cross_attention_kwargs=cross_attention_kwargs,
                     down_block_additional_residuals=down_block_res_samples if self.controlnet is not None else None,
                     mid_block_additional_residual=mid_block_res_sample if self.controlnet is not None else None,
@@ -544,9 +551,6 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                reference_control_reader.clear()
-                reference_control_writer.clear()
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):

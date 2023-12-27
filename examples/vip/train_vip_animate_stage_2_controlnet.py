@@ -142,9 +142,14 @@ def parse_args():
         default=4,
     )
     parser.add_argument(
+        "--sample_stride",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=160)
+    parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -275,6 +280,11 @@ def parse_args():
         type=float,
         default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
+    )
+    parser.add_argument(
+        "--caption",
+        type=str,
+        default="woman posing for a photo, simple white background",
     )
     parser.add_argument(
         "--tracker_project_name",
@@ -462,7 +472,9 @@ def main(args):
         drop_text=args.drop_text,
         num_frames=args.num_frames,
         stride=args.stride,
+        sample_stride=args.sample_stride,
         is_video=True,
+        caption=args.caption,
     )
 
     train_dataloader = torch.utils.data.DataLoader(

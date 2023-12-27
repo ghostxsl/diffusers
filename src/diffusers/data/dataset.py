@@ -397,11 +397,11 @@ class ConPoseDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         example = {}
-        name = self.metadata[index][0]
+        name, captions = self.metadata[index]
         data = {
             'image': load_image(join(self.train_data_dir, name)),
             'condition': pkl_load(
-                join(self.condition_data_dir, splitext(name)[0] + '_pose.pkl'))
+                join(self.condition_data_dir, splitext(name)[0] + '.pose'))
         }
         data = self.image_transforms(data)
         example["pixel_values"] = self.img_normalize(data['image'])
@@ -410,7 +410,6 @@ class ConPoseDataset(torch.utils.data.Dataset):
         if random.random() < self.drop_text:
             text_inputs = self.empty_text_inputs
         else:
-            captions = self.metadata[index][1]
             text_inputs = self.tokenizer(
                 captions, max_length=self.tokenizer.model_max_length,
                 padding="max_length", truncation=True, return_tensors="pt"
@@ -492,7 +491,9 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             drop_text=0.1,
             num_frames=24,
             stride=4,
+            sample_stride=16,
             is_video=False,
+            caption=""
     ):
         assert os.path.exists(dataset_csv)
         assert os.path.exists(train_data_dir)
@@ -508,7 +509,9 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
         self.drop_text = drop_text
         self.num_frames = num_frames
         self.stride = stride
+        self.sample_stride = sample_stride
         self.is_video = is_video
+        self.caption = caption
         self.clip_length = (self.num_frames - 1) * self.stride + 1
         self.empty_text_inputs = tokenizer(
             "", max_length=tokenizer.model_max_length,
@@ -524,8 +527,9 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             else:
                 self.video_to_image[video_name].append(name)
 
-        self._length = len(self.metadata) if not is_video else len(self.video_to_image)
-        self.video_names = list(self.video_to_image.keys())
+        self.video_list = self.get_frames_name_list()
+
+        self._length = len(self.metadata) if not is_video else len(self.video_list)
 
         self.image_transforms = tv_transforms.Compose(
             [
@@ -544,27 +548,56 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
 
         return img.to(dtype).div(255.0)
 
-    def get_frames(self, video_list):
-        st_idx = random.randint(0, self.stride - 1)
-        samples_idx = list(range(st_idx, len(video_list), self.stride))
-        if len(samples_idx) >= self.num_frames:
-            st_idx = random.randint(0, len(samples_idx) - self.num_frames)
-            samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
+    def get_frames_name_list(self):
+        video_list = []
+        for vname, vlist in self.video_to_image.items():
+            vlist = np.array(vlist)
+            samples_idx = np.array(list(range(0, len(vlist), self.stride)))
+            vlist = vlist[samples_idx]
+            num_samples = int(np.ceil((len(vlist) - self.num_frames) / self.sample_stride + 1))
+
+            start_idx = 0
+            for i in range(num_samples):
+                if start_idx + self.num_frames > len(vlist):
+                    video_list.append(
+                        [vlist[j] for j in range(len(vlist) - self.num_frames, len(vlist))])
+                else:
+                    video_list.append(
+                        [vlist[j] for j in range(start_idx, start_idx + self.num_frames)])
+                start_idx += self.sample_stride
+        return video_list
+
+    def get_frames(self, video_list, random_sample=False):
+        if random_sample:
+            st_idx = random.randint(0, self.stride - 1)
+            samples_idx = list(range(st_idx, len(video_list), self.stride))
+            if len(samples_idx) >= self.num_frames:
+                st_idx = random.randint(0, len(samples_idx) - self.num_frames)
+                samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
+            else:
+                samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
+
+            images, condition_images = [], []
+            for i in samples_idx:
+                name = video_list[i]
+                img = load_image(join(self.train_data_dir, name))
+                condition_img = load_image(join(self.condition_data_dir, name))
+
+                images.append(self.to_tensor(img))
+                condition_images.append(self.to_tensor(condition_img))
+            ref_name = video_list[random.choice(samples_idx)]
         else:
-            samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
+            images, condition_images = [], []
+            for name in video_list:
+                img = load_image(join(self.train_data_dir, name))
+                condition_img = load_image(join(self.condition_data_dir, name))
 
-        images, condition_images = [], []
-        for i in samples_idx:
-            name = video_list[i]
-            img = load_image(join(self.train_data_dir, name))
-            condition_img = load_image(join(self.condition_data_dir, name))
-
-            images.append(self.to_tensor(img))
-            condition_images.append(self.to_tensor(condition_img))
+                images.append(self.to_tensor(img))
+                condition_images.append(self.to_tensor(condition_img))
+            ref_name = random.choice(video_list)
 
         images = torch.stack(images)
         condition_images = torch.stack(condition_images)
-        ref_name = video_list[random.choice(samples_idx)]
         reference_image = load_image(join(self.train_data_dir, ref_name))
 
         return images, condition_images, reference_image
@@ -572,10 +605,9 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
     def get_data(self, index):
         if self.is_video:
             # train with video
-            captions = ""
-            video_name = self.video_names[index]
-            images, condition_images, reference_image = self.get_frames(
-                self.video_to_image[video_name])
+            captions = self.caption
+            vlist = self.video_list[index]
+            images, condition_images, reference_image = self.get_frames(vlist)
             data = {
                 'image': images,
                 'condition_image': condition_images,
