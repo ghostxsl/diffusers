@@ -183,9 +183,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=60)
+    parser.add_argument("--num_train_epochs", type=int, default=120)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -312,18 +312,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=64,
-        help="The rank of the LoRA projection matrix.",
-    )
-    parser.add_argument(
-        "--lora_alpha",
-        type=int,
-        default=8,
-        help="The rank of the LoRA projection matrix.",
-    )
-    parser.add_argument(
         "--tracker_project_name",
         type=str,
         default="train_animate",
@@ -373,8 +361,7 @@ def main(args):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+        os.makedirs(args.output_dir, exist_ok=True)
 
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -385,12 +372,6 @@ def main(args):
                     weights.pop()
                     model = models.pop()
                     if isinstance(model, UNet2DConditionModel):
-                        # save lora
-                        lora_state_dict = get_module_kohya_state_dict(model, "lora_unet", torch.float32)
-                        os.makedirs(join(output_dir, "lora_unet"), exist_ok=True)
-                        save_file(lora_state_dict, join(
-                            output_dir, "lora_unet", "pytorch_lora_weights.safetensors"))
-
                         # save ip_adapter
                         ip_adapter_state_dict = get_ip_adapter_state_dict(model, torch.float32)
                         os.makedirs(join(output_dir, "ip_adapter"), exist_ok=True)
@@ -409,12 +390,6 @@ def main(args):
                 model = models.pop()
 
                 if isinstance(model, UNet2DConditionModel):
-                    # load lora
-                    lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(
-                        input_dir, subfolder="lora_unet")
-                    LoraLoaderMixin.load_lora_into_unet(
-                        lora_state_dict, network_alphas=network_alphas, unet=model)
-
                     # load ip_adapter
                     ip_adapter_state_dict = load_file(join(input_dir, "ip_adapter", "pytorch_ip_adapter_weights.safetensors"))
                     model.load_state_dict(ip_adapter_state_dict, strict=False)
@@ -487,28 +462,6 @@ def main(args):
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     image_encoder.to(accelerator.device, dtype=weight_dtype)
 
-    # Add LoRA to the student U-Net, only the LoRA projection matrix will be updated by the optimizer.
-    lora_config = LoraConfig(
-        r=args.lora_rank,
-        target_modules=[
-            "to_q",
-            "to_k",
-            "to_v",
-            "to_out.0",
-            "proj_in",
-            "proj_out",
-            "ff.net.0.proj",
-            "ff.net.2",
-            "conv1",
-            "conv2",
-            "conv_shortcut",
-            "downsamplers.0.conv",
-            "upsamplers.0.conv",
-        ],
-        lora_alpha=args.lora_alpha,
-    )
-    # Add adapter and make sure the trainable params are in float32.
-    unet.add_adapter(lora_config)
     # Add IP-Adapter
     if args.ip_adapter_model_path is not None:
         ip_adapter_state_dict = torch.load(args.ip_adapter_model_path, map_location='cpu')
@@ -845,9 +798,6 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
-        save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
-
         ip_adapter_state_dict = get_ip_adapter_state_dict(unet, torch.float32)
         save_file(ip_adapter_state_dict, join(args.output_dir, "pytorch_ip_adapter_weights.safetensors"))
 
