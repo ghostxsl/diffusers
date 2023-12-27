@@ -48,6 +48,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
+from diffusers.utils.state_dict_utils import convert_state_dict_to_diffusers
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.data import FaceDataset, t2i_collate_fn
 from diffusers.loaders import LoraLoaderMixin
@@ -917,8 +918,13 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
-        save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
+        unet_lora_layers = convert_state_dict_to_diffusers(get_peft_model_state_dict(unet))
+        StableDiffusionPipeline.save_lora_weights(
+            save_directory=args.output_dir,
+            unet_lora_layers=unet_lora_layers,
+        )
+        # lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", torch.float32)
+        # save_file(lora_state_dict, join(args.output_dir, "pytorch_lora_weights.safetensors"))
 
     accelerator.end_training()
 

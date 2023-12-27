@@ -164,3 +164,16 @@ def draw_handpose(canvas, kpts, kpt_valid, radius=4, show_number=False):
                         0.3, (0, 0, 0),
                         lineType=cv2.LINE_AA)
     return canvas
+
+
+def draw_facepose(canvas, kpts, kpt_valid):
+    H, W, _ = canvas.shape
+    kpts[..., 0] = np.clip(kpts[..., 0], 0, W - 1)
+    kpts[..., 1] = np.clip(kpts[..., 1], 0, H - 1)
+    for face, face_valid in zip(kpts, kpt_valid):
+        for kpt, is_valid in zip(face, face_valid):
+            if is_valid:
+                cv2.circle(
+                    canvas, (int(kpt[0]), int(kpt[1])),
+                    3, (255, 255, 255), thickness=-1)
+    return canvas

@@ -459,10 +459,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        reference_control_writer = ReferenceAttentionControl(
-            self.referencenet, mode='write', fusion_blocks='full')
-        reference_control_reader = ReferenceAttentionControl(
-            self.unet, mode='read', fusion_blocks='full')
+        reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
 
         # 1. Encode input prompt
         prompt_embeds, negative_prompt_embeds = self.encode_prompt(
@@ -547,7 +544,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                     )
 
                 self.referencenet(reference_latents, t, encoder_hidden_states)
-                reference_control_reader.update(reference_control_writer, dtype=prompt_embeds.dtype)
+                reference_control_reader.update(self.referencenet, dtype=prompt_embeds.dtype)
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -566,9 +563,6 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                reference_control_reader.clear()
-                reference_control_writer.clear()
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
