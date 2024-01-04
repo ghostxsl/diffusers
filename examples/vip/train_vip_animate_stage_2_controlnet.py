@@ -343,12 +343,11 @@ def main(args):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                while len(weights) > 0:
+                for model in models:
+                    # make sure to pop weight so that corresponding model is not saved again
                     weights.pop()
-                    model = models.pop()
 
-                    sub_dir = "motion_adapter"
-                    model.save_motion_modules(join(output_dir, sub_dir))
+                    model.save_motion_modules(join(output_dir, "motion_adapter"))
 
         def load_model_hook(models, input_dir):
             while len(models) > 0:
