@@ -35,14 +35,14 @@ model, vis_processors, _ = load_model_and_preprocess(
     name="blip2_opt", model_type="caption_coco_opt2.7b", is_eval=True, device=device
 )
 
-img_dir = "/xsl/wilson.xu/dataset/train_images"
+img_dir = "/xsl/wilson.xu/dataset/tmp_imgs/pro_img"
 img_list = os.listdir(img_dir)
 
-caption_list = pandas.read_csv("/xsl/wilson.xu/dataset/59w_caption.csv").values.tolist()
+caption_list = pandas.read_csv("/xsl/wilson.xu/dataset/new_mote_caption.csv").values.tolist()
 caption_dict = {a[0]: a[1] for a in caption_list}
 
 
-out_file = "/xsl/wilson.xu/dataset/mote_caption.csv"
+out_file = "/xsl/wilson.xu/dataset/mote_caption_split1.csv"
 f = open(out_file, "a", encoding="utf-8", newline="")
 writer = csv.writer(f)
 writer.writerow(['file_name', 'text'])
