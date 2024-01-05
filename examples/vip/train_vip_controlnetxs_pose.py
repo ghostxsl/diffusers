@@ -42,7 +42,7 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.data import ConPoseDataset, controlnet_collate_fn
+from diffusers.data import ConPoseDataset, controlnet_collate_fn, ModelEMA
 from controlnetxs import ControlNetXSModel
 
 logger = get_logger(__name__)
@@ -81,6 +81,37 @@ def parse_args():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--dataset_csv",
+        type=str,
+        default=None,
+        required=True,
+        help=(
+            "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
+            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
+            " or to a folder containing files that 🤗 Datasets can understand."
+        ),
+    )
+    parser.add_argument(
+        "--train_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
+        ),
+    )
+    parser.add_argument(
+        "--condition_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the conditional training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
+        ),
+    )
     parser.add_argument(
         "--resolution",
         type=int,
@@ -226,41 +257,20 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--dataset_csv",
-        type=str,
-        default=None,
-        required=True,
-        help=(
-            "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
-            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
-            " or to a folder containing files that 🤗 Datasets can understand."
-        ),
-    )
-    parser.add_argument(
-        "--train_data_dir",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training data. Folder contents must follow the structure described in"
-            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
-            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
-        ),
-    )
-    parser.add_argument(
-        "--condition_data_dir",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the conditional training data. Folder contents must follow the structure described in"
-            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
-            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
-        ),
-    )
-    parser.add_argument(
         "--drop_text",
         type=float,
         default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
+    )
+    parser.add_argument(
+        "--use_ema",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.9998,
     )
 
     args = parser.parse_args()
@@ -305,6 +315,36 @@ def main(args):
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
+    # `accelerate` 0.16.0 will have better support for customized saving
+    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+        def save_model_hook(models, weights, output_dir):
+            if accelerator.is_main_process:
+                for model in models:
+                    # make sure to pop weight so that corresponding model is not saved again
+                    weights.pop()
+
+                    model.save_pretrained(os.path.join(output_dir, "controlnet"))
+
+                    if args.use_ema:
+                        model.save_config(os.path.join(output_dir, "ema"))
+                        ema_model.save_model(os.path.join(output_dir, "ema"))
+
+        def load_model_hook(models, input_dir):
+            while len(models) > 0:
+                # pop models so that they are not loaded again
+                model = models.pop()
+
+                # load diffusers style into model
+                load_model = ControlNetXSModel.from_pretrained(input_dir, subfolder="controlnet")
+                model.register_to_config(**load_model.config)
+
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+
+        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_load_state_pre_hook(load_model_hook)
+
     # Load the tokenizer, text_encoder
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
@@ -329,32 +369,6 @@ def main(args):
     else:
         logger.info("Initializing controlnet weights from unet")
         controlnet = ControlNetXSModel.init_original(unet, is_sdxl=False)
-
-    # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                for model in models:
-                    # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
-
-                    model.save_pretrained(os.path.join(output_dir, "controlnet"))
-
-        def load_model_hook(models, input_dir):
-            while len(models) > 0:
-                # pop models so that they are not loaded again
-                model = models.pop()
-
-                # load diffusers style into model
-                load_model = ControlNetXSModel.from_pretrained(input_dir, subfolder="controlnet")
-                model.register_to_config(**load_model.config)
-
-                model.load_state_dict(load_model.state_dict())
-                del load_model
-
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
 
     vae.requires_grad_(False)
     unet.requires_grad_(False)
@@ -462,6 +476,9 @@ def main(args):
         controlnet, optimizer, train_dataloader, lr_scheduler
     )
 
+    if args.use_ema and accelerator.is_main_process:
+        ema_model = ModelEMA(controlnet, args.ema_decay)
+
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -520,6 +537,9 @@ def main(args):
 
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
+
+            if args.use_ema and accelerator.is_main_process:
+                ema_model = ModelEMA(controlnet, args.ema_decay)
     else:
         initial_global_step = 0
 
@@ -586,6 +606,9 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
+                    if args.use_ema:
+                        ema_model.update()
+
                     if global_step % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
@@ -623,6 +646,9 @@ def main(args):
     if accelerator.is_main_process:
         controlnet = accelerator.unwrap_model(controlnet)
         controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
+
+        controlnet.save_config(os.path.join(args.output_dir, "ema"))
+        ema_model.save_model(os.path.join(args.output_dir, "ema"))
 
     accelerator.end_training()
 

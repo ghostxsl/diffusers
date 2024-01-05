@@ -1,3 +1,4 @@
+# Copyright (c) wilson.xu. All rights reserved.
 import os
 from os.path import join, splitext
 from PIL import Image, ImageOps
@@ -36,7 +37,7 @@ model, vis_processors, _ = load_model_and_preprocess(
 )
 
 img_dir = "/xsl/wilson.xu/dataset/tmp_imgs/pro_img"
-img_list = os.listdir(img_dir)
+img_list = sorted(os.listdir(img_dir))
 
 caption_list = pandas.read_csv("/xsl/wilson.xu/dataset/new_mote_caption.csv").values.tolist()
 caption_dict = {a[0]: a[1] for a in caption_list}
@@ -47,6 +48,7 @@ f = open(out_file, "a", encoding="utf-8", newline="")
 writer = csv.writer(f)
 writer.writerow(['file_name', 'text'])
 
+count = 0
 for name in tqdm(img_list):
     if caption_dict.get(name, None) is None:
         img = load_image(join(img_dir, name))
@@ -54,11 +56,9 @@ for name in tqdm(img_list):
         caption = model.generate({"image": image})
         writer.writerow([name, caption[0]])
         f.flush()
-        print(f"{name}: {caption[0]}")
     else:
-        writer.writerow([name, caption_dict[name]])
-        f.flush()
-        print(f"{name}: {caption_dict[name]}")
+        count += 1
 
 f.close()
 print('Done!')
+print(count)
