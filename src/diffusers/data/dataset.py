@@ -363,22 +363,16 @@ class ConPoseDataset(torch.utils.data.Dataset):
         img_size=512,
         drop_text=0.1
     ):
-        assert os.path.exists(dataset_csv)
-        assert os.path.exists(train_data_dir)
-        assert os.path.exists(condition_data_dir)
         if drop_text < 0. or drop_text > 1.:
             raise ValueError("`drop_text` must be in the range [0., 1.].")
 
-        self.dataset_csv = dataset_csv
-        self.train_data_dir = train_data_dir
-        self.condition_data_dir = condition_data_dir
         self.tokenizer = tokenizer
         self.drop_text = drop_text
         self.empty_text_inputs = tokenizer(
             "", max_length=tokenizer.model_max_length,
             padding="max_length", truncation=True, return_tensors="pt")
 
-        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
+        self.metadata = self.get_metadata(dataset_csv, train_data_dir, condition_data_dir)
         self._length = len(self.metadata)
 
         self.image_transforms = tv_transforms.Compose(
@@ -395,13 +389,25 @@ class ConPoseDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
+    def get_metadata(self, dataset_csv, train_data_dir, condition_data_dir):
+        print("Loading dataset...")
+        dataset_csv = dataset_csv.split(',')
+        train_data_dir = train_data_dir.split(',')
+        condition_data_dir = condition_data_dir.split(',')
+
+        out = []
+        for csv_file, tdir, cdir in zip(dataset_csv, train_data_dir, condition_data_dir):
+            temp = pandas.read_csv(csv_file).values.tolist()
+            for name, caption in tqdm(temp):
+                out.append([join(tdir, name), join(cdir, splitext(name)[0] + '.pose'), caption])
+        return out
+
     def __getitem__(self, index):
         example = {}
-        name, captions = self.metadata[index]
+        img_path, cond_path, caption = self.metadata[index]
         data = {
-            'image': load_image(join(self.train_data_dir, name)),
-            'condition': pkl_load(
-                join(self.condition_data_dir, splitext(name)[0] + '.pose'))
+            'image': load_image(img_path),
+            'condition': pkl_load(cond_path),
         }
         data = self.image_transforms(data)
         example["pixel_values"] = self.img_normalize(data['image'])
@@ -411,7 +417,7 @@ class ConPoseDataset(torch.utils.data.Dataset):
             text_inputs = self.empty_text_inputs
         else:
             text_inputs = self.tokenizer(
-                captions, max_length=self.tokenizer.model_max_length,
+                caption, max_length=self.tokenizer.model_max_length,
                 padding="max_length", truncation=True, return_tensors="pt"
             )
         example["input_ids"] = text_inputs.input_ids

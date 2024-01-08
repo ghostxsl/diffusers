@@ -392,7 +392,6 @@ def main(args):
 
     text_encoder.requires_grad_(False)
     vae.requires_grad_(False)
-    controlnet.requires_grad_(False)
     referencenet.requires_grad_(False)
     unet.freeze_unet2d_params()
 
@@ -407,7 +406,6 @@ def main(args):
     # Move vae, unet and text_encoder to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
-    controlnet.to(accelerator.device, dtype=weight_dtype)
     referencenet.to(accelerator.device, dtype=weight_dtype)
 
     if args.enable_xformers_memory_efficient_attention:
@@ -452,7 +450,7 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = [p for p in list(unet.parameters()) if p.requires_grad]
+    params_to_optimize = [p for p in unet.parameters() if p.requires_grad] + list(controlnet.parameters())
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -486,10 +484,7 @@ def main(args):
         pin_memory=True,
     )
 
-    reference_control_writer = ReferenceAttentionControl(
-        referencenet, mode='write', fusion_blocks='full')
-    reference_control_reader = ReferenceAttentionControl(
-        unet, mode='read', fusion_blocks='full')
+    reference_control_reader = ReferenceAttentionControl(unet, fusion_blocks='full')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -508,8 +503,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet, optimizer, train_dataloader, lr_scheduler
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -575,9 +570,10 @@ def main(args):
     )
 
     unet.train()
+    controlnet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate(unet, controlnet):
                 # Convert images to latent space
                 latents = vae.encode(
                     batch["pixel_values"].reshape([-1,] + list(batch["pixel_values"].shape[-3:])).to(
@@ -616,8 +612,7 @@ def main(args):
                 reference_latents = reference_latents * vae.config.scaling_factor
 
                 referencenet(reference_latents, timesteps, encoder_hidden_states)
-                reference_control_reader.update(reference_control_writer, dtype=weight_dtype)
-                reference_control_writer.clear()
+                reference_control_reader.update(referencenet, dtype=weight_dtype)
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -629,7 +624,6 @@ def main(args):
                     ],
                     mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                 ).sample
-                reference_control_reader.clear()
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
