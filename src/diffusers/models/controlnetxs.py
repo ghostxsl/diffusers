@@ -643,7 +643,7 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
 
             temb = ctrl_temb * interpolation_param + base_temb * (1 - interpolation_param)
         else:
-            temb = base_model.time_embedding(t_emb)
+            temb = base_model.time_embedding(t_emb, timestep_cond)
 
         # added time & text embeddings
         aug_emb = None

@@ -520,28 +520,18 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                if self.controlnet is not None:
-                    down_block_res_samples, mid_block_res_sample = self.controlnet(
-                        latent_model_input,
-                        t,
-                        encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=control_image,
-                        conditioning_scale=cond_scale,
-                        return_dict=False,
-                    )
-
                 self.referencenet(reference_latents, t, encoder_hidden_states)
                 reference_control_reader.update(self.referencenet, dtype=prompt_embeds.dtype)
 
                 # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
+                noise_pred = self.controlnet(
+                    base_model=self.unet,
+                    sample=latent_model_input,
+                    timestep=t,
                     encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=control_image,
                     added_cond_kwargs={"image_embeds": image_embeds} if self.image_encoder is not None else None,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    down_block_additional_residuals=down_block_res_samples if self.controlnet is not None else None,
-                    mid_block_additional_residual=mid_block_res_sample if self.controlnet is not None else None,
                 ).sample
 
                 # perform guidance

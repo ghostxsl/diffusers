@@ -32,6 +32,7 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, CLIPTextModel
+from safetensors.torch import load_file
 
 import diffusers
 from diffusers import (
@@ -121,7 +122,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=32, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=56, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -171,7 +172,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
+        default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -190,7 +191,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=2000, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=1000, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -423,9 +424,8 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = list(controlnet.parameters())
     optimizer = optimizer_class(
-        params_to_optimize,
+        controlnet.parameters(),
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -474,7 +474,7 @@ def main(args):
     )
 
     if args.use_ema and accelerator.is_main_process:
-        ema_model = ModelEMA(controlnet, args.ema_decay)
+        ema_model = ModelEMA(accelerator.unwrap_model(controlnet), args.ema_decay)
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -536,7 +536,15 @@ def main(args):
             first_epoch = global_step // num_update_steps_per_epoch
 
             if args.use_ema and accelerator.is_main_process:
-                ema_model = ModelEMA(controlnet, args.ema_decay)
+                ema_path = os.path.join(args.output_dir, path, "ema", "diffusion_pytorch_model.safetensors")
+                if os.path.exists(ema_path):
+                    ema_state_dict = load_file(ema_path)
+                    ema_step = ema_state_dict.pop("step", 0)
+                    ema_step = ema_step.item() if isinstance(ema_step, torch.Tensor) else ema_step
+                    ema_model.resume(ema_state_dict, step=ema_step, device=accelerator.device)
+                    logger.info(f"Resume from ema {ema_path}")
+                else:
+                    logger.warning("No ema model resume from checkpoint.")
     else:
         initial_global_step = 0
 
@@ -591,7 +599,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(controlnet.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
