@@ -19,7 +19,7 @@ from diffusers.models.attention_processor import (
 from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from diffusers.pipelines.vip.vip_animate_image import VIPAnimateImagePipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
-from diffusers.models import ControlNetModel
+from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
 
@@ -31,13 +31,13 @@ num_frames = 24
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
-csv_file = join(root_dir, "train_png.csv")
+csv_file = join(root_dir, "mini_train_png.csv.csv")
 img_dir = join(root_dir, "train_png")
 pose_dir = join(root_dir, "train_png_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
-referencenet_model_path = "/xsl/wilson.xu/animate_film_ctrl_100/referencenet"
-controlnet_path = "/xsl/wilson.xu/animate_film_ctrl_100/controlnet"
+referencenet_model_path = "/xsl/wilson.xu/animate_xs_100e/referencenet"
+controlnet_path = "/xsl/wilson.xu/animate_xs_100e/controlnet"
 image_encoder_model_path = "/xsl/wilson.xu/weights/IP-Adapter/image_encoder"
 
 out_dir = "output"
@@ -115,7 +115,7 @@ if __name__ == '__main__':
         else:
             video_to_image[video_name].append(name)
 
-    controlnet = ControlNetModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
+    controlnet = ControlNetXSModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
     referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
     pipe = VIPAnimateImagePipeline.from_pretrained(
         base_path,

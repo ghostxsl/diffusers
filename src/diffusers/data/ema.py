@@ -65,11 +65,11 @@ class ModelEMA(object):
 
         self.step += 1
 
-    def resume(self, state_dict, step=0):
+    def resume(self, state_dict, step=0, device=torch.device("cuda")):
         unexpected_keys = []
         for k, v in state_dict.items():
             if k in self.state_dict:
-                self.state_dict[k] = v
+                self.state_dict[k] = v.to(device)
             else:
                 unexpected_keys.append(k)
         self.step = step
@@ -79,13 +79,14 @@ class ModelEMA(object):
     def save_model(self,
                    save_directory,
                    safe_serialization=True,
-                   weights_name="ema_model.safetensors"):
+                   weights_name="diffusion_pytorch_model.safetensors"):
         if os.path.isfile(save_directory):
             logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
             return
         os.makedirs(save_directory, exist_ok=True)
 
         # Save the model
+        self.state_dict["step"] = torch.tensor(self.step)
         if safe_serialization:
             save_file(
                 self.state_dict, os.path.join(save_directory, weights_name), metadata={"format": "pt"}

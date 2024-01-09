@@ -3,10 +3,10 @@ import argparse
 
 import numpy as np
 import torch
-from controlnetxs import ControlNetXSModel
 from PIL import Image
 from pipeline_controlnet_xs import StableDiffusionControlNetXSPipeline
 
+from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.utils import load_image
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 
