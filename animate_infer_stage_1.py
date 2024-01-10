@@ -31,7 +31,7 @@ num_frames = 24
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
-csv_file = join(root_dir, "mini_train_png.csv.csv")
+csv_file = join(root_dir, "mini_train_png.csv")
 img_dir = join(root_dir, "train_png")
 pose_dir = join(root_dir, "train_png_pose")
 

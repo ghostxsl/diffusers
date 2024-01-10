@@ -33,7 +33,7 @@ from .videoreader import VideoReader
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
-    'AnimateAnyoneDataset',
+    'AnimateDataset',
 ]
 
 
@@ -485,7 +485,7 @@ class ConCannyDataset(torch.utils.data.Dataset):
         return example
 
 
-class AnimateAnyoneDataset(torch.utils.data.Dataset):
+class AnimateDataset(torch.utils.data.Dataset):
     def __init__(
             self,
             dataset_csv,
@@ -533,10 +533,12 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             else:
                 self.video_to_image[video_name].append(name)
 
-        self.video_list = self.get_frames_name_list()
+        self._length = len(self.metadata)
+        if is_video:
+            self.video_list = self.get_frames_name_list()
+            self._length = len(self.video_list)
 
-        self._length = len(self.metadata) if not is_video else len(self.video_list)
-
+        self._draw = DrawPose(prob_hand=1.0, prob_face=1.0)
         self.image_transforms = tv_transforms.Compose(
             [
                 ResizePadToTensor(img_size, interpolation='bilinear'),
@@ -587,7 +589,8 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             for i in samples_idx:
                 name = video_list[i]
                 img = load_image(join(self.train_data_dir, name))
-                condition_img = load_image(join(self.condition_data_dir, name))
+                points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
+                condition_img = self._draw.draw_pose(img, points)
 
                 images.append(self.to_tensor(img))
                 condition_images.append(self.to_tensor(condition_img))
@@ -596,7 +599,8 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
             images, condition_images = [], []
             for name in video_list:
                 img = load_image(join(self.train_data_dir, name))
-                condition_img = load_image(join(self.condition_data_dir, name))
+                points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
+                condition_img = self._draw.draw_pose(img, points)
 
                 images.append(self.to_tensor(img))
                 condition_images.append(self.to_tensor(condition_img))
@@ -634,13 +638,16 @@ class AnimateAnyoneDataset(torch.utils.data.Dataset):
                 ref_name = random.choice(video_list[st_idx: end_idx])
             else:
                 ref_name = random.choice(video_list)
+
+            img = load_image(join(self.train_data_dir, name))
+            points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
             data = {
-                'image': self.to_tensor(load_image(join(self.train_data_dir, name))),
-                'condition_image': self.to_tensor(load_image(join(self.condition_data_dir, name))),
+                'image': self.to_tensor(img),
+                'condition_image': self.to_tensor(self._draw.draw_pose(img, points)),
                 'reference_image': load_image(join(self.train_data_dir, ref_name))
             }
-        data = self.image_transforms(data)
 
+        data = self.image_transforms(data)
         return data, captions
 
     def __getitem__(self, index):
