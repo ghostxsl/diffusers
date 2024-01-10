@@ -476,7 +476,7 @@ class DrawPose(object):
                  body_kpt_thr=0.3,
                  hand_kpt_thr=0.3,
                  face_kpt_thr=0.3,
-                 prob_hand=0.9,
+                 prob_hand=0.8,
                  prob_face=0.6):
         _log_api_usage_once(self)
         self.hand = hand
@@ -487,27 +487,31 @@ class DrawPose(object):
         self.prob_hand = prob_hand
         self.prob_face = prob_face
 
+    def draw_pose(self, src_img, points_dict):
+        _, height, width = F.get_dimensions(src_img)
+        canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
+
+        kpts = points_dict['body']['keypoints'][..., :2] * np.array([width, height])
+        kpt_valid = points_dict['body']['keypoints'][..., 2] > self.body_kpt_thr
+        canvas = draw_bodypose(canvas, kpts, kpt_valid)
+
+        if self.hand and points_dict['hand'] is not None and random.random() <= self.prob_hand:
+            kpts = points_dict['hand']['keypoints'][..., :2] * np.array([width, height])
+            kpt_valid = points_dict['hand']['keypoints'][..., 2] > self.hand_kpt_thr
+            canvas = draw_handpose(canvas, kpts, kpt_valid)
+
+        if self.face and points_dict['face'] is not None and random.random() <= self.prob_face:
+            kpts = points_dict['face']['keypoints'][..., :2] * np.array([width, height])
+            kpt_valid = points_dict['face']['keypoints'][..., 2] > self.face_kpt_thr
+            canvas = draw_facepose(canvas, kpts, kpt_valid)
+
+        return Image.fromarray(canvas)
+
     def __call__(self, data):
         assert isinstance(data, dict)
 
         if 'condition' in data and 'image' in data:
-            _, height, width = F.get_dimensions(data['image'])
-            canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
-            kpts = data['condition']['body']['keypoints'][..., :2] * np.array([width, height])
-            kpt_valid = data['condition']['body']['keypoints'][..., 2] > self.body_kpt_thr
-            canvas = draw_bodypose(canvas, kpts, kpt_valid)
-
-            if self.hand and data['condition']['hand'] is not None and random.random() < self.prob_hand:
-                kpts = data['condition']['hand']['keypoints'][..., :2] * np.array([width, height])
-                kpt_valid = data['condition']['hand']['keypoints'][..., 2] > self.hand_kpt_thr
-                canvas = draw_handpose(canvas, kpts, kpt_valid)
-
-            if self.face and data['condition']['face'] is not None and random.random() < self.prob_face:
-                kpts = data['condition']['face']['keypoints'][..., :2] * np.array([width, height])
-                kpt_valid = data['condition']['face']['keypoints'][..., 2] > self.face_kpt_thr
-                canvas = draw_facepose(canvas, kpts, kpt_valid)
-
-            data['condition_image'] = Image.fromarray(canvas)
+            data['condition_image'] = self.draw_pose(data['image'], data['condition'])
         else:
             raise Exception(f"Not found keys: [`image`, `condition`]")
 
@@ -764,10 +768,20 @@ class ResizePadToTensor(object):
 
         if img.ndim == 3:
             img = img.unsqueeze(0)
-            img = torch.nn.functional.interpolate(img, size=[h, w], mode=self.interpolation)
+            img = torch.nn.functional.interpolate(
+                img,
+                size=[h, w],
+                mode=self.interpolation,
+                antialias=True
+            )
             img = img.squeeze(0)
         elif img.ndim == 4:
-            img = torch.nn.functional.interpolate(img, size=[h, w], mode=self.interpolation)
+            img = torch.nn.functional.interpolate(
+                img,
+                size=[h, w],
+                mode=self.interpolation,
+                antialias=True
+            )
 
         # pad
         if w > h:

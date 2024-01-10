@@ -54,7 +54,7 @@ from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from diffusers.optimization import get_scheduler
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.loaders import LoraLoaderMixin
-from diffusers.data import AnimateAnyoneDataset, animate_collate_fn
+from diffusers.data import AnimateDataset, animate_collate_fn
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
 
@@ -578,7 +578,7 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = AnimateAnyoneDataset(
+    train_dataset = AnimateDataset(
         dataset_csv=args.dataset_csv,
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
