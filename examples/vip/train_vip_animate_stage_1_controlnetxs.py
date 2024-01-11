@@ -429,7 +429,7 @@ def main(args):
     params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
     params_to_optimize = [
         {"params": list(referencenet.parameters())},
-        {"params": list(controlnet.parameters()), "lr": args.learning_rate}
+        {"params": list(controlnet.parameters()), "lr": args.learning_rate / 2}
     ]
     optimizer = optimizer_class(
         params_to_optimize,
@@ -575,8 +575,8 @@ def main(args):
                     timestep=timesteps,
                     encoder_hidden_states=encoder_hidden_states,
                     controlnet_cond=controlnet_image,
-                    return_dict=True,
-                ).sample
+                    return_dict=False,
+                )[0]
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
