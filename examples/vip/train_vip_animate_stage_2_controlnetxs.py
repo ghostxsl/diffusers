@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=768,
         help=(
             "The resolution for input images, all the images in the train dataset will be resized to this"
             " resolution"
@@ -138,7 +138,7 @@ def parse_args():
     parser.add_argument(
         "--num_frames",
         type=int,
-        default=24,
+        default=16,
     )
     parser.add_argument(
         "--stride",
@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument(
         "--sample_stride",
         type=int,
-        default=16,
+        default=12,
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
@@ -407,7 +407,6 @@ def main(args):
     text_encoder.requires_grad_(False)
     referencenet.requires_grad_(False)
     unet.freeze_unet2d_params()
-    controlnet.freeze_controlnet2d_params()
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
