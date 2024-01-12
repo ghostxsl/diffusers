@@ -551,10 +551,18 @@ class AnimateDataset(torch.utils.data.Dataset):
         return self._length
 
     def to_tensor(self, img, dtype=torch.float32):
-        img = np.array(img).transpose((2, 0, 1))
-        img = torch.from_numpy(img).contiguous()
+        def _to_tensor(img):
+            img = np.array(img).transpose((2, 0, 1))
+            img = torch.from_numpy(img).contiguous()
+            return img.to(dtype).div(255.0)
 
-        return img.to(dtype).div(255.0)
+        if isinstance(img, (list, tuple)):
+            img = [_to_tensor(p) for p in img]
+            img = torch.stack(img)
+        else:
+            img = _to_tensor(img)
+
+        return img
 
     def get_frames_name_list(self):
         video_list = []
@@ -602,12 +610,10 @@ class AnimateDataset(torch.utils.data.Dataset):
                 points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
                 condition_img = self._draw.draw_pose(img, points)
 
-                images.append(self.to_tensor(img))
-                condition_images.append(self.to_tensor(condition_img))
+                images.append(img)
+                condition_images.append(condition_img)
             ref_name = random.choice(video_list)
 
-        images = torch.stack(images)
-        condition_images = torch.stack(condition_images)
         reference_image = load_image(join(self.train_data_dir, ref_name))
 
         return images, condition_images, reference_image
@@ -642,12 +648,14 @@ class AnimateDataset(torch.utils.data.Dataset):
             img = load_image(join(self.train_data_dir, name))
             points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
             data = {
-                'image': self.to_tensor(img),
-                'condition_image': self.to_tensor(self._draw.draw_pose(img, points)),
+                'image': img,
+                'condition_image': self._draw.draw_pose(img, points),
                 'reference_image': load_image(join(self.train_data_dir, ref_name))
             }
-
         data = self.image_transforms(data)
+        data['image'] = self.to_tensor(data['image'])
+        data['condition_image'] = self.to_tensor(data['condition_image'])
+
         return data, captions
 
     def __getitem__(self, index):

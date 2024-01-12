@@ -172,8 +172,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         self,
         sample_size: Optional[int] = None,
         in_channels: int = 4,
-        out_channels: int = 4,
-        center_input_sample: bool = False,
         flip_sin_to_cos: bool = True,
         freq_shift: int = 0,
         down_block_types: Tuple[str] = (
@@ -183,12 +181,15 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             "DownBlock2D",
         ),
         mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
-        up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
+        up_block_types: Tuple[str] = (
+                "UpBlock2D",
+                "CrossAttnUpBlock2D",
+                "CrossAttnUpBlock2D",
+                "CrossAttnUpBlock2D"
+        ),
         only_cross_attention: Union[bool, Tuple[bool]] = False,
         block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
         layers_per_block: Union[int, Tuple[int]] = 2,
-        downsample_padding: int = 1,
-        mid_block_scale_factor: float = 1,
         dropout: float = 0.0,
         act_fn: str = "silu",
         norm_num_groups: Optional[int] = 32,
@@ -215,8 +216,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         time_embedding_act_fn: Optional[str] = None,
         timestep_post_act: Optional[str] = None,
         time_cond_proj_dim: Optional[int] = None,
-        conv_in_kernel: int = 3,
-        conv_out_kernel: int = 3,
         projection_class_embeddings_input_dim: Optional[int] = None,
         attention_type: str = "default",
         class_embeddings_concat: bool = False,
@@ -252,40 +251,8 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 f"Must provide the same number of `block_out_channels` as `down_block_types`. `block_out_channels`: {block_out_channels}. `down_block_types`: {down_block_types}."
             )
 
-        if not isinstance(only_cross_attention, bool) and len(only_cross_attention) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `only_cross_attention` as `down_block_types`. `only_cross_attention`: {only_cross_attention}. `down_block_types`: {down_block_types}."
-            )
-
-        if not isinstance(num_attention_heads, int) and len(num_attention_heads) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `num_attention_heads` as `down_block_types`. `num_attention_heads`: {num_attention_heads}. `down_block_types`: {down_block_types}."
-            )
-
-        if not isinstance(attention_head_dim, int) and len(attention_head_dim) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `attention_head_dim` as `down_block_types`. `attention_head_dim`: {attention_head_dim}. `down_block_types`: {down_block_types}."
-            )
-
-        if isinstance(cross_attention_dim, list) and len(cross_attention_dim) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `cross_attention_dim` as `down_block_types`. `cross_attention_dim`: {cross_attention_dim}. `down_block_types`: {down_block_types}."
-            )
-
-        if not isinstance(layers_per_block, int) and len(layers_per_block) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `layers_per_block` as `down_block_types`. `layers_per_block`: {layers_per_block}. `down_block_types`: {down_block_types}."
-            )
-        if isinstance(transformer_layers_per_block, list) and reverse_transformer_layers_per_block is None:
-            for layer_number_per_block in transformer_layers_per_block:
-                if isinstance(layer_number_per_block, list):
-                    raise ValueError("Must provide 'reverse_transformer_layers_per_block` if using asymmetrical UNet.")
-
         # input
-        conv_in_padding = (conv_in_kernel - 1) // 2
-        self.conv_in = nn.Conv2d(
-            in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
-        )
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
 
         # time
         if time_embedding_type == "fourier":
@@ -465,7 +432,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=cross_attention_dim[i],
                 num_attention_heads=num_attention_heads[i],
-                downsample_padding=downsample_padding,
+                downsample_padding=1,
                 dual_cross_attention=dual_cross_attention,
                 use_linear_projection=use_linear_projection,
                 only_cross_attention=only_cross_attention[i],
@@ -491,7 +458,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 dropout=dropout,
                 resnet_eps=norm_eps,
                 resnet_act_fn=act_fn,
-                output_scale_factor=mid_block_scale_factor,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 cross_attention_dim=cross_attention_dim[-1],
                 num_attention_heads=num_attention_heads[-1],
@@ -508,7 +474,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 dropout=dropout,
                 resnet_eps=norm_eps,
                 resnet_act_fn=act_fn,
-                output_scale_factor=mid_block_scale_factor,
                 cross_attention_dim=cross_attention_dim[-1],
                 attention_head_dim=attention_head_dim[-1],
                 resnet_groups=norm_num_groups,
@@ -525,7 +490,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 num_layers=0,
                 resnet_eps=norm_eps,
                 resnet_act_fn=act_fn,
-                output_scale_factor=mid_block_scale_factor,
                 resnet_groups=norm_num_groups,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 add_attention=False,
@@ -938,10 +902,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         if encoder_attention_mask is not None:
             encoder_attention_mask = (1 - encoder_attention_mask.to(sample.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
-
-        # 0. center input if necessary
-        if self.config.center_input_sample:
-            sample = 2 * sample - 1.0
 
         # 1. time
         timesteps = timestep
