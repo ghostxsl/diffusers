@@ -121,7 +121,7 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=768,
         help=(
             "The resolution for input images, all the images in the train dataset will be resized to this"
             " resolution"
@@ -130,7 +130,7 @@ def parse_args():
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=150)
+    parser.add_argument("--num_train_epochs", type=int, default=300)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -429,7 +429,7 @@ def main(args):
     params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters())
     params_to_optimize = [
         {"params": list(referencenet.parameters())},
-        {"params": list(controlnet.parameters()), "lr": args.learning_rate / 2}
+        {"params": list(controlnet.parameters()), "lr": args.learning_rate}
     ]
     optimizer = optimizer_class(
         params_to_optimize,

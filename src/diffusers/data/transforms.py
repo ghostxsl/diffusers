@@ -337,7 +337,11 @@ class RandomHorizontalFlip(torch.nn.Module):
             if isinstance(img, dict):
                 for k, v in img.items():
                     if 'image' in k:
-                        img[k] = F.hflip(v)
+                        if isinstance(v, (list, tuple)):
+                            v = [F.hflip(p) for p in v]
+                            img[k] = v
+                        else:
+                            img[k] = F.hflip(v)
             else:
                 img = F.hflip(img)
         return img
@@ -807,10 +811,16 @@ class ResizePadToTensor(object):
                 if 'image' in k:
                     if isinstance(v, Image.Image):
                         img[k] = self.resize_and_pad_pil(
-                            v, pad_values=self.pad_values if k != 'condition_image' else 0)
+                            v, self.pad_values if k != 'condition_image' else 0)
                     elif isinstance(v, torch.Tensor):
                         img[k] = self.resize_and_pad_tensor(
-                            v, pad_values=self.pad_values if k != 'condition_image' else 0)
+                            v, self.pad_values if k != 'condition_image' else 0)
+                    elif isinstance(v, (list, tuple)) and isinstance(v[0], Image.Image):
+                        v = [
+                            self.resize_and_pad_pil(
+                                p, self.pad_values if k != 'condition_image' else 0) for p in v
+                        ]
+                        img[k] = v
         else:
             if isinstance(img, Image.Image):
                 img = self.resize_and_pad_pil(img, self.pad_values)

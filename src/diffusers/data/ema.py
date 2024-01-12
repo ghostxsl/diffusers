@@ -57,6 +57,9 @@ class ModelEMA(object):
                 [v is not None for _, v in model_dict.items()]), 'python gc.'
 
         for k, v in self.state_dict.items():
+            if k not in model_dict:
+                continue
+
             if model_dict[k].requires_grad:
                 v = decay * v + (1 - decay) * model_dict[k].detach()
                 self.state_dict[k] = v
@@ -93,5 +96,6 @@ class ModelEMA(object):
             )
         else:
             torch.save(self.state_dict, os.path.join(save_directory, weights_name))
+        self.state_dict.pop("step")
 
         logger.info(f"Model weights saved in {os.path.join(save_directory, weights_name)}")
