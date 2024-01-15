@@ -138,7 +138,7 @@ def parse_args():
     parser.add_argument(
         "--num_frames",
         type=int,
-        default=16,
+        default=12,
     )
     parser.add_argument(
         "--stride",
@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument(
         "--sample_stride",
         type=int,
-        default=12,
+        default=8,
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
@@ -432,13 +432,11 @@ def main(args):
                 )
             unet.enable_xformers_memory_efficient_attention()
             controlnet.enable_xformers_memory_efficient_attention()
-            referencenet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-        controlnet.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -617,7 +615,7 @@ def main(args):
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 controlnet_image = controlnet_image.reshape((-1,) + controlnet_image.shape[-3:])
                 model_pred = controlnet(
-                    base_model=unet,
+                    base_model=accelerator.unwrap_model(unet),
                     sample=noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=encoder_hidden_states,

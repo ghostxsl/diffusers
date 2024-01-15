@@ -11,25 +11,28 @@ from diffusers.pipelines.vip.vip_animate_video import VIPAnimateVideoPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from diffusers.models import ControlNetModel, MotionAdapter
 from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.controlnetxs_motion_model import ControlNetXSMotionModel
 from diffusers.utils.vip_utils import *
 from diffusers.utils import export_to_gif, export_to_video
 
 
 device = torch.device("cuda")
 dtype = torch.float16
-stride = 10
+stride = 4
 num_frames = 16
+sample_stride = 12
+H, W = 512, 512
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
-csv_file = join(root_dir, "train_png.csv")
+csv_file = join(root_dir, "mini_train_png.csv")
 img_dir = join(root_dir, "train_png")
 pose_dir = join(root_dir, "train_png_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
-referencenet_model_path = "/xsl/wilson.xu/animate_film_ctrl_100/referencenet"
-controlnet_path = "/xsl/wilson.xu/animate_film_ctrl_100/controlnet"
-motion_adapter_model_path = "/xsl/wilson.xu/animatediff-motion-adapter-v1-5-2"
+referencenet_model_path = "/xsl/wilson.xu/animate_xs_0111/referencenet"
+controlnet_path = "/xsl/wilson.xu/diffusers/animate_model/checkpoint-1/controlnet_motion/"
+motion_adapter_model_path = "/xsl/wilson.xu/diffusers/animate_model/checkpoint-1/motion_adapter//"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -74,7 +77,7 @@ def pad_image(img, pad_values=255):
     return Image.fromarray(img)
 
 
-def get_reference_pose_frames(video_list):
+def get_reference_pose_frames(video_list, num_frames=25, stride=4):
     st_idx = random.randint(0, stride - 1)
     samples_idx = list(range(st_idx, len(video_list), stride))
     if len(samples_idx) >= num_frames:
@@ -112,13 +115,15 @@ if __name__ == '__main__':
             video_to_image[video_name].append(name)
 
     motion_adapter = MotionAdapter.from_pretrained(motion_adapter_model_path)
-    controlnet = ControlNetModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
+    controlnet = ControlNetXSMotionModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
     referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
     pipe = VIPAnimateVideoPipeline.from_pretrained(
         base_path,
         motion_adapter=motion_adapter,
         controlnet=controlnet,
         referencenet=referencenet,
+        num_frames=num_frames,
+        sample_stride=sample_stride,
         torch_dtype=dtype).to(device)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 
@@ -130,12 +135,11 @@ if __name__ == '__main__':
 
         reference, pose, gt_img = get_reference_pose_frames(v)
         out = pipe(
-            prompt="",
-            num_frames=num_frames,
+            prompt="woman posing for a photo, simple white background",
             reference_image=reference,
             control_images=pose,
-            height=512,
-            width=512,
+            height=H,
+            width=W,
             num_inference_steps=25,
             guidance_scale=1.0,
             negative_prompt="",
@@ -143,11 +147,11 @@ if __name__ == '__main__':
             generator=generator,
         )
         out_gifs = []
-        reference = reference.resize((512, 512), 1)
+        reference = reference.resize((H, W), 1)
         for out_img, gt, pose_img in zip(out[0], gt_img, pose):
             out_gif = np.concatenate(
-                [reference, pose_img.resize((512, 512), 1),
-                 gt.resize((512, 512), 1), out_img], axis=1
+                [reference, pose_img.resize((H, W), 1),
+                 gt.resize((H, W), 1), out_img], axis=1
             )
             out_gifs.append(Image.fromarray(out_gif))
         export_to_gif(out_gifs, join(out_dir, k + '.gif'))
