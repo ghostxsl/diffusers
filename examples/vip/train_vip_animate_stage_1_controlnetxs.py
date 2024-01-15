@@ -394,12 +394,10 @@ def main(args):
                 )
             unet.enable_xformers_memory_efficient_attention()
             controlnet.enable_xformers_memory_efficient_attention()
-            referencenet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
         referencenet.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,

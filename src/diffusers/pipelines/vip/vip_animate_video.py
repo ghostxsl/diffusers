@@ -63,11 +63,9 @@ EXAMPLE_DOC_STRING = """
 def tensor2vid(video: torch.Tensor, processor, output_type="np"):
     # Based on:
     # https://github.com/modelscope/modelscope/blob/1509fdb973e5871f37148a4b5e5964cafd43e64d/modelscope/pipelines/multi_modal/text_to_video_synthesis_pipeline.py#L78
-
-    batch_size, channels, num_frames, height, width = video.shape
     outputs = []
-    for batch_idx in range(batch_size):
-        batch_vid = video[batch_idx].permute(1, 0, 2, 3)
+    for batch_idx in range(video.shape[0]):
+        batch_vid = video[batch_idx]
         batch_output = processor.postprocess(batch_vid, output_type)
 
         outputs.append(batch_output)
@@ -77,7 +75,7 @@ def tensor2vid(video: torch.Tensor, processor, output_type="np"):
 
 class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
-    # _optional_components = ["feature_extractor", "image_encoder"]
+    _optional_components = ["feature_extractor", "image_encoder"]
 
     def __init__(
         self,
@@ -98,7 +96,11 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         image_encoder=None,
         controlnet: ControlNetModel = None,
         referencenet: ReferenceNetModel = None,
+        num_frames: int = 16,
+        sample_stride: int = 12,
     ):
+        assert sample_stride <= num_frames
+
         super().__init__()
         unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
 
@@ -109,11 +111,13 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             unet=unet,
             motion_adapter=motion_adapter,
             scheduler=scheduler,
+            feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
             controlnet=controlnet,
             referencenet=referencenet,
         )
-        self.feature_extractor = feature_extractor,
-        self.image_encoder = image_encoder,
+        self.num_frames = num_frames
+        self.sample_stride = sample_stride
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(
@@ -230,11 +234,11 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
     def decode_latents(self, latents):
         latents = 1 / self.vae.config.scaling_factor * latents
 
-        batch_size, channels, num_frames, height, width = latents.shape
-        latents = latents.permute(0, 2, 1, 3, 4).reshape(batch_size * num_frames, channels, height, width)
+        batch_size, num_frames = latents.shape[:2]
+        latents = latents.reshape((-1,) + latents.shape[2:])
 
         images = self.vae.decode(latents).sample
-        video = images.reshape([batch_size, num_frames, -1] + list(images.shape[-2:])).transpose(1, 2)
+        video = images.reshape([batch_size, num_frames, -1] + list(images.shape[-2:]))
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         video = video.float()
         return video
@@ -373,12 +377,12 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
     # Copied from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_synth.TextToVideoSDPipeline.prepare_latents
     def prepare_latents(
-        self, batch_size, num_channels_latents, num_frames, height, width, dtype, device, generator
+        self, batch_size, num_channels_latents, video_length, height, width, dtype, device, generator
     ):
         shape = (
             batch_size,
+            video_length,
             num_channels_latents,
-            num_frames,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
@@ -420,6 +424,9 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         dtype,
         do_classifier_free_guidance=False,
     ):
+        video_length = len(images)
+        num_pad = self.sample_stride - (video_length - self.num_frames) % self.sample_stride
+        images.extend([images[-1] for _ in range(num_pad)])
         images = self.control_image_processor.preprocess(
             images, height=height, width=width).to(dtype=torch.float32)
         images = images.repeat_interleave(num_images_per_prompt, dim=0)
@@ -430,13 +437,52 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         return images
 
+    def prepare_reference_latents(
+            self,
+            reference_image,
+            num_videos_per_prompt,
+            height,
+            width,
+            device,
+            dtype,
+            do_classifier_free_guidance,
+            generator,
+    ):
+        reference_image = reference_image.resize((width, height), 1)
+        if do_classifier_free_guidance:
+            uncond_image = Image.new("RGB", reference_image.size)
+
+        reference_image = Normalize([0.5], [0.5], inplace=True)(
+            ToTensor()(reference_image)).unsqueeze(0).repeat_interleave(num_videos_per_prompt, dim=0)
+        if do_classifier_free_guidance:
+            uncond_image = Normalize([0.5], [0.5], inplace=True)(
+                ToTensor()(uncond_image)).unsqueeze(0).repeat_interleave(num_videos_per_prompt, dim=0)
+
+        reference_image = torch.cat([uncond_image, reference_image]) if do_classifier_free_guidance else reference_image
+        reference_latents = self._encode_vae_image(reference_image.to(device, dtype=dtype), generator)
+
+        return reference_latents
+
+    def get_video_index_queue(self, v_length):
+        out_idx = []
+        num_samples = int(np.ceil((v_length - self.num_frames) / self.sample_stride + 1))
+        start_idx = 0
+        for i in range(num_samples):
+            if start_idx + self.num_frames > v_length:
+                out_idx.append(
+                    list(range(v_length - self.num_frames, v_length)))
+            else:
+                out_idx.append(
+                    list(range(start_idx, start_idx + self.num_frames)))
+            start_idx += self.sample_stride
+        return out_idx
+
     @torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]] = "",
-        num_frames: Optional[int] = 16,
         reference_image: Image.Image = None,
-        control_images: Image.Image = None,
+        control_images: List[Image.Image] = None,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: int = 20,
@@ -458,6 +504,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
+        video_length = len(control_images)
 
         reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
 
@@ -482,25 +529,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 3. Prepare latent variables
-        num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
-            num_videos_per_prompt,
-            num_channels_latents,
-            num_frames,
-            height,
-            width,
-            prompt_embeds.dtype,
-            device,
-            generator,
-        )
-
-        # 4. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
-
-        encoder_hidden_states = prompt_embeds
-
-        # 5. Prepare control image
+        # 3. Prepare control image
         control_images = self.prepare_control_image(
             control_images,
             width,
@@ -511,51 +540,74 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             do_classifier_free_guidance
         )
 
-        # Prepare reference latents
-        reference_image = reference_image.resize((width, height), 1)
-        if do_classifier_free_guidance:
-            uncond_image = Image.new("RGB", reference_image.size)
+        # 4. Prepare latent variables
+        num_channels_latents = self.unet.config.in_channels
+        latents = self.prepare_latents(
+            num_videos_per_prompt,
+            num_channels_latents,
+            control_images.shape[0],
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
+        )
 
-        reference_image = Normalize([0.5], [0.5], inplace=True)(
-            ToTensor()(reference_image)).unsqueeze(0).repeat_interleave(num_videos_per_prompt, dim=0)
-        if do_classifier_free_guidance:
-            uncond_image = Normalize([0.5], [0.5], inplace=True)(
-                ToTensor()(uncond_image)).unsqueeze(0).repeat_interleave(num_videos_per_prompt, dim=0)
+        # 5. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        reference_image = torch.cat([uncond_image, reference_image]) if do_classifier_free_guidance else reference_image
-        reference_latents = self._encode_vae_image(reference_image.to(device, dtype=prompt_embeds.dtype), generator)
+        encoder_hidden_states = prompt_embeds
+
+        # 6. Prepare reference latents
+        reference_latents = self.prepare_reference_latents(
+            reference_image,
+            num_videos_per_prompt,
+            height,
+            width,
+            device,
+            prompt_embeds.dtype,
+            do_classifier_free_guidance,
+            generator,
+        )
+
+        # 7. get inference index queue
+        infer_queue = self.get_video_index_queue(control_images.shape[0])
 
         # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-                if self.controlnet is not None:
-                    down_block_res_samples, mid_block_res_sample = self.controlnet(
-                        latent_model_input.transpose(1, 2).reshape([-1, latents.shape[1]] + list(latents.shape[-2:])),
-                        t,
-                        encoder_hidden_states=encoder_hidden_states.repeat_interleave(num_frames, dim=0),
-                        controlnet_cond=control_images,
-                        conditioning_scale=cond_scale,
-                        return_dict=False,
-                    )
+                noise_pred = torch.zeros(
+                    (latents.shape[0] * (2 if do_classifier_free_guidance else 1),) + latents.shape[1:],
+                    device=device, dtype=latents.dtype)
+                divisor = torch.zeros(
+                    (1, latents.shape[1], 1, 1, 1), device=device, dtype=latents.dtype)
 
                 self.referencenet(reference_latents, t, encoder_hidden_states)
                 reference_control_reader.update(self.referencenet, dtype=prompt_embeds.dtype)
 
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=encoder_hidden_states,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    down_block_additional_residuals=down_block_res_samples if self.controlnet is not None else None,
-                    mid_block_additional_residual=mid_block_res_sample if self.controlnet is not None else None,
-                ).sample
+                for idx in infer_queue:
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([latents[:, idx]] * 2) if do_classifier_free_guidance else latents[:, idx]
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                    control_image = control_images[idx]
 
+                    # predict the noise residual
+                    n_pred = self.controlnet(
+                        base_model=self.unet,
+                        sample=latent_model_input,
+                        timestep=t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        return_dict=False,
+                    )[0]
+
+                    noise_pred[:, idx] += n_pred
+                    divisor[:, idx] += 1
+
+                noise_pred /= divisor
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -571,7 +623,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                         callback(i, t, latents)
 
         # Post-processing
-        video_tensor = self.decode_latents(latents)
+        video_tensor = self.decode_latents(latents[:, :video_length])
 
         video = tensor2vid(video_tensor, self.image_processor, output_type=output_type)
 

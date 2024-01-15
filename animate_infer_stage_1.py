@@ -1,5 +1,5 @@
 import os
-from os.path import join
+from os.path import join, splitext
 from collections import OrderedDict
 import random
 import numpy as np
@@ -22,22 +22,24 @@ from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
+from diffusers.data import DrawPose, pkl_load
 
 
 device = torch.device("cuda")
 dtype = torch.float16
 stride = 4
 num_frames = 24
+H, W = 768, 768
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
 csv_file = join(root_dir, "mini_train_png.csv")
 img_dir = join(root_dir, "train_png")
-pose_dir = join(root_dir, "train_png_pose")
+pose_dir = join(root_dir, "train_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
-referencenet_model_path = "/xsl/wilson.xu/animate_xs_100e/referencenet"
-controlnet_path = "/xsl/wilson.xu/animate_xs_100e/controlnet"
+referencenet_model_path = "/xsl/wilson.xu/animate_xs_768/referencenet"
+controlnet_path = "/xsl/wilson.xu/animate_xs_768/controlnet"
 image_encoder_model_path = "/xsl/wilson.xu/weights/IP-Adapter/image_encoder"
 
 out_dir = "output"
@@ -83,6 +85,7 @@ def pad_image(img, pad_values=255):
     return Image.fromarray(img)
 
 
+_draw = DrawPose(prob_hand=1.0, prob_face=1.0)
 def get_reference_pose_frame(video_list):
     st_idx = random.randint(0, stride - 1)
     samples_idx = list(range(st_idx, len(video_list), stride))
@@ -94,8 +97,11 @@ def get_reference_pose_frame(video_list):
 
     name = video_list[random.choice(samples_idx)]
     img = load_image(join(img_dir, name))
+
+    pose = pkl_load(join(pose_dir, splitext(name)[0] + '.pose'))
+    pose = _draw.draw_pose(img, pose)
+
     img = pad_image(img)
-    pose = load_image(join(pose_dir, name))
     pose = pad_image(pose, 0)
 
     ref_name = video_list[random.choice(samples_idx)]
@@ -186,17 +192,17 @@ if __name__ == '__main__':
             prompt="woman posing for a photo, simple white background",
             reference_image=reference,
             control_image=pose,
-            height=512,
-            width=512,
+            height=H,
+            width=W,
             num_inference_steps=25,
-            guidance_scale=1.0,
+            guidance_scale=2.0,
             negative_prompt="",
             num_images_per_prompt=1,
             generator=generator,
         )
         out_img = np.concatenate(
-            [reference.resize((512, 512), 1), pose.resize((512, 512), 1),
-             gt_img.resize((512, 512), 1), out[0]], axis=1)
+            [reference.resize((H, W), 1), pose.resize((H, W), 1),
+             gt_img.resize((H, W), 1), out[0]], axis=1)
         Image.fromarray(out_img).save(join(out_dir, k + '.png'))
         ind += 1
 

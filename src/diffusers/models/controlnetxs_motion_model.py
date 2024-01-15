@@ -464,12 +464,12 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
         encoder_hidden_states: torch.Tensor,
         controlnet_cond: torch.Tensor,
         conditioning_scale: float = 1.0,
-        class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
         return_dict: bool = True,
+        **kwargs,
     ) -> Union[ControlNetXSOutput, Tuple]:
         """
         The [`ControlNetModel`] forward method.
@@ -487,8 +487,6 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
                 The conditional input tensor of shape `(batch_size, sequence_length, hidden_size)`.
             conditioning_scale (`float`, defaults to `1.0`):
                 How much the control model affects the base model outputs.
-            class_labels (`torch.Tensor`, *optional*, defaults to `None`):
-                Optional class labels for conditioning. Their embeddings will be summed with the timestep embeddings.
             timestep_cond (`torch.Tensor`, *optional*, defaults to `None`):
                 Additional conditional embeddings for timestep. If provided, the embeddings will be summed with the
                 timestep_embedding passed through the `self.time_embedding` layer to obtain the final timestep
