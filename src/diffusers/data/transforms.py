@@ -480,8 +480,8 @@ class DrawPose(object):
                  body_kpt_thr=0.3,
                  hand_kpt_thr=0.3,
                  face_kpt_thr=0.3,
-                 prob_hand=0.8,
-                 prob_face=0.6):
+                 prob_hand=0.5,
+                 prob_face=0.5):
         _log_api_usage_once(self)
         self.hand = hand
         self.face = face
@@ -734,6 +734,8 @@ class ResizePadToTensor(object):
             elif h > w:
                 w = int(self.size / h * w)
                 h = self.size
+            else:
+                w = h = self.size
         elif isinstance(self.size, Sequence):
             w, h = self.size[::-1]
         img = img.resize((w, h), resample=Image.LANCZOS)
@@ -767,6 +769,8 @@ class ResizePadToTensor(object):
             elif h > w:
                 w = int(self.size / h * w)
                 h = self.size
+            else:
+                w = h = self.size
         elif isinstance(self.size, Sequence):
             w, h = self.size[::-1]
 

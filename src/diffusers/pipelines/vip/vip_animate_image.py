@@ -530,9 +530,11 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                     timestep=t,
                     encoder_hidden_states=encoder_hidden_states,
                     controlnet_cond=control_image,
+                    conditioning_scale=cond_scale,
                     added_cond_kwargs={"image_embeds": image_embeds} if self.image_encoder is not None else None,
                     cross_attention_kwargs=cross_attention_kwargs,
-                ).sample
+                    return_dict=False,
+                )[0]
 
                 # perform guidance
                 if do_classifier_free_guidance:
