@@ -1,5 +1,5 @@
 import os
-from os.path import join
+from os.path import join, splitext
 from collections import OrderedDict
 import random
 import numpy as np
@@ -14,25 +14,26 @@ from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.models.controlnetxs_motion_model import ControlNetXSMotionModel
 from diffusers.utils.vip_utils import *
 from diffusers.utils import export_to_gif, export_to_video
+from diffusers.data import DrawPose, pkl_load
 
 
 device = torch.device("cuda")
 dtype = torch.float16
 stride = 4
-num_frames = 16
-sample_stride = 12
-H, W = 512, 512
+num_frames = 12
+sample_stride = 8
+H, W = 768, 768
 
 root_dir = "/xsl/wilson.xu/fashion_video"
 
 csv_file = join(root_dir, "mini_train_png.csv")
 img_dir = join(root_dir, "train_png")
-pose_dir = join(root_dir, "train_png_pose")
+pose_dir = join(root_dir, "train_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
-referencenet_model_path = "/xsl/wilson.xu/animate_xs_0111/referencenet"
-controlnet_path = "/xsl/wilson.xu/diffusers/animate_model/checkpoint-1/controlnet_motion/"
-motion_adapter_model_path = "/xsl/wilson.xu/diffusers/animate_model/checkpoint-1/motion_adapter//"
+referencenet_model_path = "/xsl/wilson.xu/animate_motion_768_0116/referencenet"
+controlnet_path = "/xsl/wilson.xu/animate_motion_768_0116/controlnet_motion/"
+motion_adapter_model_path = "/xsl/wilson.xu/animate_motion_768_0116/motion_adapter/"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -77,6 +78,7 @@ def pad_image(img, pad_values=255):
     return Image.fromarray(img)
 
 
+_draw = DrawPose(prob_hand=1.0, prob_face=1.0)
 def get_reference_pose_frames(video_list, num_frames=25, stride=4):
     st_idx = random.randint(0, stride - 1)
     samples_idx = list(range(st_idx, len(video_list), stride))
@@ -90,11 +92,13 @@ def get_reference_pose_frames(video_list, num_frames=25, stride=4):
     for i in samples_idx:
         name = video_list[i]
         img = load_image(join(img_dir, name))
-        img = pad_image(img)
-        imgs.append(img)
 
-        pose = load_image(join(pose_dir, name))
+        pose = pkl_load(join(pose_dir, splitext(name)[0] + '.pose'))
+        pose = _draw.draw_pose(img, pose)
+
+        img = pad_image(img)
         pose = pad_image(pose, 0)
+        imgs.append(img)
         pose_list.append(pose)
 
     ref_name = video_list[random.choice(samples_idx)]

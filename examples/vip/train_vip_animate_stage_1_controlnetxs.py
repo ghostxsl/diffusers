@@ -128,6 +128,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=12,
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=300)
@@ -444,7 +454,9 @@ def main(args):
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
         img_size=args.resolution,
-        drop_text=args.drop_text
+        drop_text=args.drop_text,
+        num_frames=args.num_frames,
+        stride=args.stride,
     )
 
     train_dataloader = torch.utils.data.DataLoader(

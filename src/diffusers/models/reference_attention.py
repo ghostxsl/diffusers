@@ -89,7 +89,8 @@ class ReferenceAttentionControl(object):
             gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
 
             if norm_hidden_states.shape[0] != self.bank.shape[0]:
-                self.bank = self.bank.repeat_interleave(repeats=norm_hidden_states.shape[0], dim=0)
+                uc_size = norm_hidden_states.shape[0] // self.bank.shape[0]
+                self.bank = self.bank.repeat_interleave(repeats=uc_size, dim=0)
             attn_output = self.attn1(
                 norm_hidden_states,
                 encoder_hidden_states=encoder_hidden_states if self.only_cross_attention\
