@@ -1167,6 +1167,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 class AttnIdentity(nn.Module):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__()
+        self.bank = None
 
     def forward(self, input, *args, **kwargs):
         self.bank = input.reshape(list(input.shape[:2]) + [-1,]).transpose(1, 2)
