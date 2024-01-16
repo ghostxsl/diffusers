@@ -28,12 +28,13 @@ from .transforms import *
 from .utils import *
 from diffusers.utils.vip_utils import load_image
 from .videoreader import VideoReader
+from .vos_uploader import VOSUploader
 
 
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
-    'AnimateDataset',
+    'AnimateDataset', 'AnimateVosDataset'
 ]
 
 
@@ -651,6 +652,238 @@ class AnimateDataset(torch.utils.data.Dataset):
                 'image': img,
                 'condition_image': self._draw.draw_pose(img, points),
                 'reference_image': load_image(join(self.train_data_dir, ref_name))
+            }
+        data = self.image_transforms(data)
+        data['image'] = self.to_tensor(data['image'])
+        data['condition_image'] = self.to_tensor(data['condition_image'])
+
+        return data, captions
+
+    def __getitem__(self, index):
+        example = {}
+        data, captions = self.get_data(index)
+
+        example["pixel_values"] = self.img_normalize(data['image'])
+        example["conditioning_pixel_values"] = data['condition_image']
+
+        if random.random() < self.drop_text:
+            text_inputs = self.empty_text_inputs
+            data['reference_image'] = Image.new("RGB", data['reference_image'].size)
+        else:
+            text_inputs = self.tokenizer(
+                captions, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt"
+            )
+
+        example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
+        example["input_ids"] = text_inputs.input_ids
+        if self.clip_processor is not None:
+            example["reference_image"] = self.clip_processor(
+                images=data["reference_image"], return_tensors="pt").pixel_values
+
+        return example
+
+
+class AnimateVosDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_csv,
+            train_data_dir,
+            condition_data_dir,
+            tokenizer,
+            clip_processor=None,
+            img_size=512,
+            drop_text=0.1,
+            num_frames=24,
+            stride=4,
+            sample_stride=16,
+            is_video=False,
+            caption="",
+            base_img_vos_path="http://gd17-ai-inner-storegw.api.vip.com/llm-cv-public/vid_gen/data/animate_anyone/frames_img_1227"
+    ):
+        assert os.path.exists(dataset_csv)
+        assert os.path.exists(train_data_dir)
+        assert os.path.exists(condition_data_dir)
+        if drop_text < 0. or drop_text > 1.:
+            raise ValueError("`drop_text` must be in the range [0., 1.].")
+
+        self.dataset_csv = dataset_csv
+        self.train_data_dir = train_data_dir
+        self.condition_data_dir = condition_data_dir
+        self.tokenizer = tokenizer
+        self.clip_processor = clip_processor
+        self.drop_text = drop_text
+        self.num_frames = num_frames
+        self.stride = stride
+        self.sample_stride = sample_stride
+        self.is_video = is_video
+        self.caption = caption
+        self.clip_length = (self.num_frames - 1) * self.stride + 1
+        self.empty_text_inputs = tokenizer(
+            "", max_length=tokenizer.model_max_length,
+            padding="max_length", truncation=True, return_tensors="pt")
+
+        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
+
+        self.video_to_image = OrderedDict()
+        for name, captions in self.metadata:
+            video_name = name.split('-')[0]
+            if video_name not in self.video_to_image:
+                self.video_to_image[video_name] = [name]
+            else:
+                self.video_to_image[video_name].append(name)
+
+        self._length = len(self.metadata)
+        if is_video:
+            self.video_list = self.get_frames_name_list()
+            self._length = len(self.video_list)
+
+        self._draw = DrawPose(prob_hand=1.0, prob_face=1.0)
+        self.image_transforms = tv_transforms.Compose(
+            [
+                ResizePadToTensor(img_size, interpolation='bilinear'),
+                RandomHorizontalFlip(),
+            ]
+        )
+        self.img_normalize = Normalize([0.5], [0.5], inplace=True)
+
+        self.vos_obj = VOSUploader()
+        self.base_img_vos_path = base_img_vos_path
+
+    def __len__(self):
+        return self._length
+
+    def to_tensor(self, img, dtype=torch.float32):
+        def _to_tensor(img):
+            img = np.array(img).transpose((2, 0, 1))
+            img = torch.from_numpy(img).contiguous()
+            return img.to(dtype).div(255.0)
+
+        if isinstance(img, (list, tuple)):
+            img = [_to_tensor(p) for p in img]
+            img = torch.stack(img)
+        else:
+            img = _to_tensor(img)
+
+        return img
+
+    # to get the image or pose vos url from the name
+    def get_vos_url(self, name, is_pose):
+        if not is_pose:
+            vid_id, img_id = name.split('-')
+            url = os.path.join(self.base_img_vos_path, vid_id, img_id)
+        else:
+            vid_id = name.split('-')[0]
+            pose_id = name.split('-')[-1].replace('.jpg', '.pose')
+            pose_bath_path = self.base_img_vos_path.replace('frames_img_1227', 'frames_pose_1227')
+            url = os.path.join(pose_bath_path, vid_id, pose_id)
+        return url
+
+    def get_frames_name_list(self):
+        video_list = []
+        for vname, vlist in self.video_to_image.items():
+            vlist = np.array(vlist)
+            samples_idx = np.array(list(range(0, len(vlist), self.stride)))
+            vlist = vlist[samples_idx]
+            num_samples = int(np.ceil((len(vlist) - self.num_frames) / self.sample_stride + 1))
+
+            start_idx = 0
+            for i in range(num_samples):
+                if start_idx + self.num_frames > len(vlist):
+                    video_list.append(
+                        [vlist[j] for j in range(len(vlist) - self.num_frames, len(vlist))])
+                else:
+                    video_list.append(
+                        [vlist[j] for j in range(start_idx, start_idx + self.num_frames)])
+                start_idx += self.sample_stride
+        return video_list
+
+    def get_frames(self, video_list, random_sample=False):
+        if random_sample:
+            st_idx = random.randint(0, self.stride - 1)
+            samples_idx = list(range(st_idx, len(video_list), self.stride))
+            if len(samples_idx) >= self.num_frames:
+                st_idx = random.randint(0, len(samples_idx) - self.num_frames)
+                samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
+            else:
+                samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
+
+            images, condition_images = [], []
+            for i in samples_idx:
+                name = video_list[i]
+                img = load_image(join(self.train_data_dir, name))
+                points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
+                condition_img = self._draw.draw_pose(img, points)
+
+                images.append(self.to_tensor(img))
+                condition_images.append(self.to_tensor(condition_img))
+            ref_name = video_list[random.choice(samples_idx)]
+        else:
+            images, condition_images = [], []
+            for name in video_list:
+                img_url = self.get_vos_url(name, is_pose=False)
+                img = self.vos_obj.display_vos(img_url)
+                img = load_image(img)
+
+                pose_url = self.get_vos_url(name, is_pose=True)
+                points = self.vos_obj.get_keypoints_json(pose_url)
+                condition_img = self._draw.draw_pose(img, points)
+                condition_img = load_image(condition_img)
+
+                images.append(img)
+                condition_images.append(condition_img)
+            ref_name = random.choice(video_list)
+
+        ref_url = self.get_vos_url(ref_name, is_pose=False)
+        reference_img = self.vos_obj.display_vos(ref_url)
+        reference_img = load_image(reference_img)
+
+        return images, condition_images, reference_img
+
+    def get_data(self, index):
+        if self.is_video:
+            # train with video
+            captions = self.caption
+            vlist = self.video_list[index]
+            images, condition_images, reference_img = self.get_frames(vlist)
+            data = {
+                'image': images,
+                'condition_image': condition_images,
+                'reference_image': reference_img
+            }
+        else:
+            # train with image
+            name, captions = self.metadata[index]
+            video_name = name.split('_')[0]
+            video_list = self.video_to_image[video_name]
+            if len(video_list) > 2 * self.clip_length:
+                idx = video_list.index(name)
+                st_idx = idx - self.clip_length if idx - self.clip_length >= 0 else 0
+                end_idx = idx + self.clip_length if idx + self.clip_length < len(video_list) else len(video_list)
+
+                st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
+                end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
+                ref_name = random.choice(video_list[st_idx: end_idx])
+            else:
+                ref_name = random.choice(video_list)
+
+            img_url = self.get_vos_url(name, is_pose=False)
+            img = self.vos_obj.display_vos(img_url)
+            img = load_image(img)
+
+            pose_url = self.get_vos_url(name, is_pose=True)
+            points = self.vos_obj.get_keypoints_json(pose_url)
+            condition_img = self._draw.draw_pose(img, points)
+            condition_img = load_image(condition_img)
+
+            ref_url = self.get_vos_url(ref_name, is_pose=False)
+            reference_img = self.vos_obj.display_vos(ref_url)
+            reference_img = load_image(reference_img)
+
+            data = {
+                'image': img,
+                'condition_image': condition_img,
+                'reference_image': reference_img
             }
         data = self.image_transforms(data)
         data['image'] = self.to_tensor(data['image'])
