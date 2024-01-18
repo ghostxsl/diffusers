@@ -380,13 +380,7 @@ def main(args):
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(
-        args.pretrained_model_path,
-        subfolder="scheduler",
-        beta_start=0.00085,
-        beta_end=0.012,
-        beta_schedule="linear",
-    )
+    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
 
     # Load motion adapter
@@ -404,7 +398,6 @@ def main(args):
     else:
         logger.info("Loading existing controlnet2d weights")
         controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path)
-        controlnet = ControlNetXSMotionModel.from_controlnet2d(controlnet)
 
     # Load ReferenceNet
     logger.info("Loading existing referencenet weights")
@@ -414,7 +407,6 @@ def main(args):
     text_encoder.requires_grad_(False)
     referencenet.requires_grad_(False)
     unet.freeze_unet2d_params()
-    controlnet.freeze_controlnet2d_params()
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -430,8 +422,6 @@ def main(args):
     referencenet.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
     cast_training_params(unet)
-    controlnet.to(accelerator.device, dtype=weight_dtype)
-    cast_training_params(controlnet)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -625,6 +615,7 @@ def main(args):
 
                 # Predict the noise residual
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                controlnet_image = controlnet_image.reshape((-1,) + controlnet_image.shape[-3:])
                 model_pred = controlnet(
                     base_model=accelerator.unwrap_model(unet),
                     sample=noisy_latents,
