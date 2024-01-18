@@ -130,7 +130,7 @@ def parse_args():
     parser.add_argument(
         "--num_frames",
         type=int,
-        default=12,
+        default=24,
     )
     parser.add_argument(
         "--stride",
@@ -357,6 +357,16 @@ def main(args):
 
     # Load scheduler and models
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
+    # noise_scheduler = DDPMScheduler.from_pretrained(
+    #     args.pretrained_model_path,
+    #     subfolder="scheduler",
+    #     beta_start=0.00085,
+    #     beta_end=0.012,
+    #     beta_schedule="linear",
+    #     prediction_type="v_prediction",
+    #     timestep_spacing="trailing",
+    #     rescale_betas_zero_snr=True,
+    # )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 

@@ -651,16 +651,6 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         # added time & text embeddings
         aug_emb = None
 
-        if base_model.class_embedding is not None:
-            if class_labels is None:
-                raise ValueError("class_labels should be provided when num_class_embeds > 0")
-
-            if base_model.config.class_embed_type == "timestep":
-                class_labels = base_model.time_proj(class_labels)
-
-            class_emb = base_model.class_embedding(class_labels).to(dtype=self.dtype)
-            temb = temb + class_emb
-
         if base_model.config.addition_embed_type is not None:
             if base_model.config.addition_embed_type == "text":
                 aug_emb = base_model.add_embedding(encoder_hidden_states)
@@ -695,6 +685,14 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
 
         # Preparation
         guided_hint = self.controlnet_cond_embedding(controlnet_cond)
+
+        sample_reshape = False
+        if sample.ndim != 4:
+            num_frames = sample.shape[1]
+            sample = sample.reshape((-1,) + sample.shape[-3:])
+            sample_reshape = True
+            temb = temb.repeat_interleave(repeats=num_frames, dim=0)
+            cemb = cemb.repeat_interleave(repeats=num_frames, dim=0)
 
         h_ctrl = h_base = sample
         hs_base, hs_ctrl = [], []
@@ -745,6 +743,9 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         h_base = base_model.conv_norm_out(h_base)
         h_base = base_model.conv_act(h_base)
         h_base = base_model.conv_out(h_base)
+
+        if sample_reshape:
+            h_base = h_base.reshape((-1, num_frames) + h_base.shape[-3:])
 
         if not return_dict:
             return (h_base,)
