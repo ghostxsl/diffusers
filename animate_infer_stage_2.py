@@ -129,7 +129,10 @@ if __name__ == '__main__':
         num_frames=num_frames,
         sample_stride=sample_stride,
         torch_dtype=dtype).to(device)
-    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
+        pipe.scheduler.config,
+        beta_schedule="linear",
+    )
 
     ind = 1
     for k, v in video_to_image.items():

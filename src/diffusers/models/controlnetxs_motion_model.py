@@ -377,6 +377,15 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
             for param in motion_modules.parameters():
                 param.requires_grad = True
 
+        for param in self.down_zero_convs_out.parameters():
+            param.requires_grad = True
+        for param in self.down_zero_convs_in.parameters():
+            param.requires_grad = True
+        for param in self.middle_block_out.parameters():
+            param.requires_grad = True
+        for param in self.up_zero_convs_out.parameters():
+            param.requires_grad = True
+
     def _gather_subblock_sizes(self):
         channel_sizes = {"down": [], "mid": [], "up": []}
 
@@ -471,42 +480,6 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
         return_dict: bool = True,
         **kwargs,
     ) -> Union[ControlNetXSOutput, Tuple]:
-        """
-        The [`ControlNetModel`] forward method.
-
-        Args:
-            base_model (`UNet2DConditionModel`):
-                The base unet model we want to control.
-            sample (`torch.FloatTensor`):
-                The noisy input tensor.
-            timestep (`Union[torch.Tensor, float, int]`):
-                The number of timesteps to denoise an input.
-            encoder_hidden_states (`torch.Tensor`):
-                The encoder hidden states.
-            controlnet_cond (`torch.FloatTensor`):
-                The conditional input tensor of shape `(batch_size, sequence_length, hidden_size)`.
-            conditioning_scale (`float`, defaults to `1.0`):
-                How much the control model affects the base model outputs.
-            timestep_cond (`torch.Tensor`, *optional*, defaults to `None`):
-                Additional conditional embeddings for timestep. If provided, the embeddings will be summed with the
-                timestep_embedding passed through the `self.time_embedding` layer to obtain the final timestep
-                embeddings.
-            attention_mask (`torch.Tensor`, *optional*, defaults to `None`):
-                An attention mask of shape `(batch, key_tokens)` is applied to `encoder_hidden_states`. If `1` the mask
-                is kept, otherwise if `0` it is discarded. Mask will be converted into a bias, which adds large
-                negative values to the attention scores corresponding to "discard" tokens.
-            added_cond_kwargs (`dict`):
-                Additional conditions for the Stable Diffusion XL UNet.
-            cross_attention_kwargs (`dict[str]`, *optional*, defaults to `None`):
-                A kwargs dictionary that if specified is passed along to the `AttnProcessor`.
-            return_dict (`bool`, defaults to `True`):
-                Whether or not to return a [`~models.controlnet.ControlNetOutput`] instead of a plain tuple.
-
-        Returns:
-            [`~models.controlnetxs.ControlNetXSOutput`] **or** `tuple`:
-                If `return_dict` is `True`, a [`~models.controlnetxs.ControlNetXSOutput`] is returned, otherwise a
-                tuple is returned where the first element is the sample tensor.
-        """
         # check channel order
         channel_order = self.config.controlnet_conditioning_channel_order
 
@@ -514,7 +487,7 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
             # in rgb order by default
             ...
         elif channel_order == "bgr":
-            controlnet_cond = torch.flip(controlnet_cond, dims=[1])
+            controlnet_cond = torch.flip(controlnet_cond, dims=[2])
         else:
             raise ValueError(f"unknown `controlnet_conditioning_channel_order`: {channel_order}")
 
@@ -543,7 +516,7 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timesteps = timesteps.expand(sample.shape[0])
-        # (batch, num_frame, channel, width, height)
+        # (batch, num_frame, channel, height, width)
         num_frames = sample.shape[1]
 
         t_emb = base_model.time_proj(timesteps)
@@ -599,8 +572,10 @@ class ControlNetXSMotionModel(ModelMixin, ConfigMixin):
         cemb = encoder_hidden_states.repeat_interleave(repeats=num_frames, dim=0)
 
         # Preparation
+        controlnet_cond = controlnet_cond.reshape((-1,) + controlnet_cond.shape[-3:])
         guided_hint = self.controlnet_cond_embedding(controlnet_cond)
 
+        # [b, f, c, h, w]
         sample = sample.reshape((-1,) + sample.shape[-3:])
         h_ctrl = h_base = sample
         hs_base, hs_ctrl = [], []

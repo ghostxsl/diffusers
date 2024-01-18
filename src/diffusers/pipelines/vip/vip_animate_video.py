@@ -124,12 +124,11 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
         )
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_prompt with num_images_per_prompt -> num_videos_per_prompt
     def encode_prompt(
         self,
         prompt,
         device,
-        num_images_per_prompt,
+        num_videos_per_prompt,
         do_classifier_free_guidance,
         negative_prompt=None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -137,8 +136,6 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
     ):
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
 
@@ -168,8 +165,8 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         bs_embed, seq_len, _ = prompt_embeds.shape
         # duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_videos_per_prompt, seq_len, -1)
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
@@ -204,8 +201,8 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
             negative_prompt_embeds = negative_prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
 
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_videos_per_prompt, 1)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
         return prompt_embeds, negative_prompt_embeds
 
@@ -415,21 +412,23 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         return image_latents
 
-    # Copied from diffusers.pipelines.controlnet.pipeline_controlnet.StableDiffusionControlNetPipeline.prepare_image
     def prepare_control_image(
         self,
         images,
+        num_videos_per_prompt,
         width,
         height,
         device,
         dtype,
     ):
         video_length = len(images)
-        num_pad = self.sample_stride - (video_length - self.num_frames) % self.sample_stride
-        images.extend([images[-1] for _ in range(num_pad)])
+        if (video_length - self.num_frames) % self.sample_stride != 0:
+            num_pad = self.sample_stride - (video_length - self.num_frames) % self.sample_stride
+            images.extend([images[-1] for _ in range(num_pad)])
         images = self.control_image_processor.preprocess(
             images, height=height, width=width)
         images = images.to(device=device, dtype=dtype)
+        images = images[None].repeat_interleave(num_videos_per_prompt, dim=0)
 
         return images
 
@@ -476,14 +475,14 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]] = "",
+        prompt: str = "",
         reference_image: Image.Image = None,
         control_images: List[Image.Image] = None,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: int = 20,
         guidance_scale: float = 6.5,
-        negative_prompt: Optional[Union[str, List[str]]] = "",
+        negative_prompt: Optional[str] = "",
         num_videos_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         cond_scale: float = 1.0,
@@ -528,6 +527,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # 3. Prepare control image
         control_images = self.prepare_control_image(
             control_images,
+            num_videos_per_prompt,
             width,
             height,
             device,
@@ -539,7 +539,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         latents = self.prepare_latents(
             num_videos_per_prompt,
             num_channels_latents,
-            control_images.shape[0],
+            control_images.shape[1],
             height,
             width,
             prompt_embeds.dtype,
@@ -565,7 +565,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         )
 
         # 7. get inference index queue
-        infer_queue = self.get_video_index_queue(control_images.shape[0])
+        infer_queue = self.get_video_index_queue(control_images.shape[1])
 
         # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
@@ -582,9 +582,9 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
                 for idx in infer_queue:
                     # expand the latents if we are doing classifier free guidance
-                    latent_model_input = torch.cat([latents[:, idx]] * 2) if do_classifier_free_guidance else latents[:, idx]
+                    latent_model_input = torch.cat([latents[:, idx],] * 2) if do_classifier_free_guidance else latents[:, idx]
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                    control_image = torch.cat([control_images[idx]] * 2) if do_classifier_free_guidance else control_images[idx]
+                    control_image = torch.cat([control_images[:, idx],] * 2) if do_classifier_free_guidance else control_images[:, idx]
 
                     # predict the noise residual
                     n_pred = self.controlnet(

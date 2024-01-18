@@ -1,12 +1,14 @@
 #!/bin/bash
+rm -rf /opt/conda/lib/python3.10/site-packages/distutils-precedence.pth
+cp prepare/distutils-precedence.pth /opt/conda/lib/python3.10/site-packages/distutils-precedence.pth
 mkdir ~/.pip
-echo "[global]" >> ~/.pip/pip.conf
-echo "index-url = http://pypi.vip.vip.com/simple/" >> ~/.pip/pip.conf
-echo "[install]" >> ~/.pip/pip.conf
-echo "trusted-host = pypi.vip.vip.com" >> ~/.pip/pip.conf
+cp prepare/pip.conf ~/.pip/pip.conf
 
-conda create --name xsl python=3.8 -y
-conda activate xsl
-pip install torch==2.0.1 torchvision==0.15.2
-cd /home/diffusers
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2
 pip install -r examples/vip/requirements.txt
+pip install -v -e .
+python /home/diffusers/prepare/prepare_accelerate.py
+
+echo "accelerate config done"
+
+sleep infinity
