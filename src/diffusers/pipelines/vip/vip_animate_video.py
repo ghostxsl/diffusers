@@ -97,9 +97,9 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         controlnet: ControlNetModel = None,
         referencenet: ReferenceNetModel = None,
         num_frames: int = 16,
-        sample_stride: int = 12,
+        overlap_frame: int = 4,
     ):
-        assert sample_stride <= num_frames
+        assert overlap_frame <= num_frames
 
         super().__init__()
         unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
@@ -117,7 +117,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             referencenet=referencenet,
         )
         self.num_frames = num_frames
-        self.sample_stride = sample_stride
+        self.sample_stride = num_frames - overlap_frame
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(

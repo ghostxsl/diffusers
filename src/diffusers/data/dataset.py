@@ -498,7 +498,7 @@ class AnimateDataset(torch.utils.data.Dataset):
             drop_text=0.1,
             num_frames=24,
             stride=4,
-            sample_stride=16,
+            overlap_frame=8,
             is_video=False,
             caption=""
     ):
@@ -516,7 +516,7 @@ class AnimateDataset(torch.utils.data.Dataset):
         self.drop_text = drop_text
         self.num_frames = num_frames
         self.stride = stride
-        self.sample_stride = sample_stride
+        self.sample_stride = num_frames - overlap_frame
         self.is_video = is_video
         self.caption = caption
         self.clip_length = (self.num_frames - 1) * self.stride + 1
@@ -696,7 +696,7 @@ class AnimateVosDataset(torch.utils.data.Dataset):
             drop_text=0.1,
             num_frames=24,
             stride=4,
-            sample_stride=16,
+            overlap_frame=8,
             is_video=False,
             caption="",
             base_img_vos_path="http://gd17-ai-inner-storegw.api.vip.com/llm-cv-public/vid_gen/data/animate_anyone/frames_img_1227"
@@ -715,7 +715,7 @@ class AnimateVosDataset(torch.utils.data.Dataset):
         self.drop_text = drop_text
         self.num_frames = num_frames
         self.stride = stride
-        self.sample_stride = sample_stride
+        self.sample_stride = num_frames - overlap_frame
         self.is_video = is_video
         self.caption = caption
         self.clip_length = (self.num_frames - 1) * self.stride + 1
