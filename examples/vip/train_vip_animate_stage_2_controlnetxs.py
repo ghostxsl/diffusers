@@ -147,9 +147,9 @@ def parse_args():
         default=4,
     )
     parser.add_argument(
-        "--sample_stride",
+        "--overlap_frame",
         type=int,
-        default=8,
+        default=4,
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
@@ -266,7 +266,7 @@ def parse_args():
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default=None,
+        default="fp16",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -495,7 +495,7 @@ def main(args):
         drop_text=args.drop_text,
         num_frames=args.num_frames,
         stride=args.stride,
-        sample_stride=args.sample_stride,
+        overlap_frame=args.overlap_frame,
         is_video=True,
         caption=args.caption,
     )
@@ -691,10 +691,10 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unet = accelerator.unwrap_model(unet)
+        unet = accelerator.unwrap_model(unet).to(torch.float32)
         unet.save_motion_modules(os.path.join(args.output_dir, "motion_adapter"))
 
-        controlnet = accelerator.unwrap_model(controlnet)
+        controlnet = accelerator.unwrap_model(controlnet).to(torch.float32)
         controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet_motion"))
 
     accelerator.end_training()

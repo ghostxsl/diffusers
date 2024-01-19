@@ -70,11 +70,6 @@ def parse_args():
         default=None,
     )
     parser.add_argument(
-        "--controlnet_motion_model_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
         "--referencenet_model_path",
         type=str,
         default=None,
@@ -139,7 +134,7 @@ def parse_args():
     parser.add_argument(
         "--num_frames",
         type=int,
-        default=12,
+        default=24,
     )
     parser.add_argument(
         "--stride",
@@ -147,14 +142,14 @@ def parse_args():
         default=4,
     )
     parser.add_argument(
-        "--sample_stride",
+        "--overlap_frame",
         type=int,
         default=8,
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=100)
+    parser.add_argument("--num_train_epochs", type=int, default=1000)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -221,7 +216,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=50, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=100, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -392,12 +387,8 @@ def main(args):
     unet = UNetMotionModel.from_unet2d(unet, motion_adapter)
 
     # Load ControlNet
-    if args.controlnet_motion_model_path:
-        logger.info("Loading existing controlnet motion weights")
-        controlnet = ControlNetXSMotionModel.from_pretrained(args.controlnet_motion_model_path)
-    else:
-        logger.info("Loading existing controlnet2d weights")
-        controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path)
+    logger.info("Loading existing controlnet2d weights")
+    controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path)
 
     # Load ReferenceNet
     logger.info("Loading existing referencenet weights")
@@ -485,7 +476,7 @@ def main(args):
         drop_text=args.drop_text,
         num_frames=args.num_frames,
         stride=args.stride,
-        sample_stride=args.sample_stride,
+        overlap_frame=args.overlap_frame,
         is_video=True,
         caption=args.caption,
     )
@@ -615,7 +606,6 @@ def main(args):
 
                 # Predict the noise residual
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                controlnet_image = controlnet_image.reshape((-1,) + controlnet_image.shape[-3:])
                 model_pred = controlnet(
                     base_model=accelerator.unwrap_model(unet),
                     sample=noisy_latents,

@@ -11,6 +11,7 @@ from diffusers.pipelines.vip.vip_animate_video import VIPAnimateVideoPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler
 from diffusers.models import ControlNetModel, MotionAdapter
 from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.models.controlnetxs_motion_model import ControlNetXSMotionModel
 from diffusers.utils.vip_utils import *
 from diffusers.utils import export_to_gif, export_to_video
@@ -21,7 +22,7 @@ device = torch.device("cuda")
 dtype = torch.float16
 stride = 4
 num_frames = 12
-sample_stride = 8
+overlap_frame = 4
 H, W = 768, 768
 
 root_dir = "/xsl/wilson.xu/fashion_video"
@@ -32,8 +33,8 @@ pose_dir = join(root_dir, "train_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
 referencenet_model_path = "/xsl/wilson.xu/animate_motion_768_0116/referencenet"
-controlnet_path = "/xsl/wilson.xu/animate_motion_768_0116/controlnet_motion/"
-motion_adapter_model_path = "/xsl/wilson.xu/animate_motion_768_0116/motion_adapter/"
+controlnet_path = "/xsl/wilson.xu/animate_s2_768_0119/controlnet_motion/"
+motion_adapter_model_path = "/xsl/wilson.xu/animate_s2_768_0119/motion_adapter/"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -127,10 +128,12 @@ if __name__ == '__main__':
         controlnet=controlnet,
         referencenet=referencenet,
         num_frames=num_frames,
-        sample_stride=sample_stride,
+        overlap_frame=overlap_frame,
         torch_dtype=dtype).to(device)
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
         pipe.scheduler.config,
+        beta_start=0.00085,
+        beta_end=0.012,
         beta_schedule="linear",
     )
 
