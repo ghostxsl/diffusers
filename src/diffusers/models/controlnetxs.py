@@ -684,6 +684,8 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         cemb = encoder_hidden_states
 
         # Preparation
+        if controlnet_cond.ndim != 4:
+            controlnet_cond = controlnet_cond.reshape((-1,) + controlnet_cond.shape[-3:])
         guided_hint = self.controlnet_cond_embedding(controlnet_cond)
 
         sample_reshape = False
