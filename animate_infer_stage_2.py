@@ -20,6 +20,7 @@ from diffusers.data import DrawPose, pkl_load
 
 device = torch.device("cuda")
 dtype = torch.float16
+total_frames = 25
 stride = 4
 num_frames = 12
 overlap_frame = 4
@@ -120,7 +121,7 @@ if __name__ == '__main__':
             video_to_image[video_name].append(name)
 
     motion_adapter = MotionAdapter.from_pretrained(motion_adapter_model_path)
-    controlnet = ControlNetXSMotionModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
+    controlnet = ControlNetXSModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
     referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
     pipe = VIPAnimateVideoPipeline.from_pretrained(
         base_path,
@@ -143,7 +144,7 @@ if __name__ == '__main__':
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
-        reference, pose, gt_img = get_reference_pose_frames(v)
+        reference, pose, gt_img = get_reference_pose_frames(v, total_frames, stride)
         out = pipe(
             prompt="woman posing for a photo, simple white background",
             reference_image=reference,

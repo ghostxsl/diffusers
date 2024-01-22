@@ -374,13 +374,12 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                     f" {negative_prompt_embeds.shape}."
                 )
 
-    # Copied from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_synth.TextToVideoSDPipeline.prepare_latents
     def prepare_latents(
         self, batch_size, num_channels_latents, video_length, height, width, dtype, device, generator
     ):
         shape = (
             batch_size,
-            video_length,
+            self.num_frames,
             num_channels_latents,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
@@ -392,6 +391,7 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             )
 
         latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        latents = latents.repeat(1, video_length // self.num_frames, 1, 1, 1)
 
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
@@ -422,8 +422,8 @@ class VIPAnimateVideoPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         dtype,
     ):
         video_length = len(images)
-        if (video_length - self.num_frames) % self.sample_stride != 0:
-            num_pad = self.sample_stride - (video_length - self.num_frames) % self.sample_stride
+        if video_length % self.num_frames != 0:
+            num_pad = self.num_frames - video_length % self.num_frames
             images.extend([images[-1] for _ in range(num_pad)])
         images = self.control_image_processor.preprocess(
             images, height=height, width=width)
