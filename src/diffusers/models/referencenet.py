@@ -45,7 +45,7 @@ from .embeddings import (
     Timesteps,
 )
 from .modeling_utils import ModelMixin
-from .unet_2d_blocks import (
+from .unets.unet_2d_blocks import (
     UNetMidBlock2D,
     UNetMidBlock2DCrossAttn,
     UNetMidBlock2DSimpleCrossAttn,

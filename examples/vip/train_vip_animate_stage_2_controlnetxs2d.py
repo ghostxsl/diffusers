@@ -375,7 +375,13 @@ def main(args):
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_pretrained(
+        args.pretrained_model_path,
+        subfolder="scheduler",
+        beta_start=0.00085,
+        beta_end=0.012,
+        beta_schedule="linear",
+    )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
 
     # Load motion adapter

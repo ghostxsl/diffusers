@@ -1,6 +1,7 @@
 import cv2
 import math
 import torch
+import json
 import pickle
 import matplotlib
 import numpy as np
@@ -9,7 +10,8 @@ import numpy as np
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn',
     'pkl_load', 'pkl_save',
-    'animate_collate_fn'
+    'animate_collate_fn',
+    'json_load', 'json_save'
 ]
 
 
@@ -69,6 +71,17 @@ def pkl_save(obj, file):
 def pkl_load(file):
     with open(file, 'rb') as f:
         out = pickle.load(f)
+    return out
+
+
+def json_save(obj, file):
+    with open(file, 'w') as f:
+        json.dump(obj, f)
+
+
+def json_load(file):
+    with open(file, 'r') as f:
+        out = json.load(f)
     return out
 
 

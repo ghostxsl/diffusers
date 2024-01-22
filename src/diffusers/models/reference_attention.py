@@ -14,7 +14,7 @@ import torch
 from typing import Any, Dict, Optional
 
 from diffusers.models.attention import BasicTransformerBlock, _chunked_feed_forward
-from diffusers.models.unet_3d_blocks import TransformerTemporalModel
+from diffusers.models.unets.unet_3d_blocks import TransformerTemporalModel
 from diffusers.models.referencenet import AttnIdentity
 
 

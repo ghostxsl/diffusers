@@ -41,6 +41,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
+from diffusers.training_utils import compute_snr
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.data import AnimateDataset, animate_collate_fn
 from diffusers.models.reference_attention import ReferenceAttentionControl
@@ -216,6 +217,13 @@ def parse_args():
         help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
     )
     parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
+    parser.add_argument(
+        "--snr_gamma",
+        type=float,
+        default=None,
+        help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+             "More details here: https://arxiv.org/abs/2303.09556.",
+    )
     parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
@@ -605,7 +613,24 @@ def main(args):
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+                if args.snr_gamma is None:
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                else:
+                    # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
+                    # Since we predict the noise instead of x_0, the original formulation is slightly changed.
+                    # This is discussed in Section 4.2 of the same paper.
+                    snr = compute_snr(noise_scheduler, timesteps)
+                    if noise_scheduler.config.prediction_type == "v_prediction":
+                        # Velocity objective requires that we add one to SNR values before we divide by them.
+                        snr = snr + 1
+                    mse_loss_weights = (
+                            torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
+                    )
+
+                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
+                    loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights
+                    loss = loss.mean()
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
