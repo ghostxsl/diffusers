@@ -539,7 +539,7 @@ class AnimateDataset(torch.utils.data.Dataset):
             self.video_list = self.get_frames_name_list()
             self._length = len(self.video_list)
 
-        self._draw = DrawPose(prob_hand=1.0, prob_face=1.0)
+        self._draw = DrawPose(prob_hand=1.0, prob_face=0.0)
         self.image_transforms = tv_transforms.Compose(
             [
                 ResizePadToTensor(img_size, interpolation='bilinear'),
@@ -642,16 +642,20 @@ class AnimateDataset(torch.utils.data.Dataset):
 
                 st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
                 end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
-                ref_name = random.choice(video_list[st_idx: end_idx])
-            else:
-                ref_name = random.choice(video_list)
+                video_list = video_list[st_idx: end_idx]
 
             img = load_image(join(self.train_data_dir, name))
             points = pkl_load(join(self.condition_data_dir, splitext(name)[0] + '.pose'))
+
+            if len(video_list) > 1:
+                video_list.remove(name)
+            ref_name = random.choice(video_list)
+            ref_img = load_image(join(self.train_data_dir, ref_name))
+
             data = {
                 'image': img,
                 'condition_image': self._draw.draw_pose(img, points),
-                'reference_image': load_image(join(self.train_data_dir, ref_name))
+                'reference_image': ref_img
             }
         data = self.image_transforms(data)
         data['image'] = self.to_tensor(data['image'])
