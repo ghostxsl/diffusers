@@ -13,9 +13,9 @@
 import torch
 from typing import Any, Dict, Optional
 
-from diffusers.models.attention import BasicTransformerBlock, _chunked_feed_forward
-from diffusers.models.unets.unet_3d_blocks import TransformerTemporalModel
-from diffusers.models.referencenet import AttnIdentity
+from .attention import BasicTransformerBlock, _chunked_feed_forward
+from .unets.unet_3d_blocks import TransformerTemporalModel
+from .referencenet import AttnIdentity
 
 
 def torch_attn_dfs(model, prefix=""):
