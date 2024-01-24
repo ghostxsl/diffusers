@@ -86,7 +86,7 @@ def parse_args():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
-        "--dataset_csv",
+        "--dataset_pkl",
         type=str,
         default=None,
         required=True,
@@ -261,7 +261,7 @@ def parse_args():
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default=None,
+        default="fp16",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -290,7 +290,14 @@ def parse_args():
     parser.add_argument(
         "--caption",
         type=str,
-        default="woman posing for a photo, simple white background",
+        default="",
+    )
+    parser.add_argument(
+        "--use_vos",
+        action="store_true",
+        help=(
+            "Whether or not to use vos to train."
+        ),
     )
 
     args = parser.parse_args()
@@ -474,7 +481,7 @@ def main(args):
 
     # Dataset and DataLoaders creation:
     train_dataset = AnimateDataset(
-        dataset_csv=args.dataset_csv,
+        dataset_pkl=args.dataset_pkl,
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
@@ -485,6 +492,7 @@ def main(args):
         overlap_frame=args.overlap_frame,
         is_video=True,
         caption=args.caption,
+        use_vos=args.use_vos,
     )
 
     train_dataloader = torch.utils.data.DataLoader(

@@ -1,3 +1,7 @@
+# Copyright (c) wilson.xu. All rights reserved.
+import os
+from os.path import join, exists, split, splitext
+import hashlib
 import cv2
 import math
 import torch
@@ -8,10 +12,10 @@ import numpy as np
 
 
 __all__ = [
-    't2i_collate_fn', 'controlnet_collate_fn',
-    'pkl_load', 'pkl_save',
-    'animate_collate_fn',
-    'json_load', 'json_save'
+    't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
+    'pkl_save', 'pkl_load', 'json_save', 'json_load',
+    'draw_bodypose', 'draw_handpose', 'draw_facepose',
+    'get_file_md5', 'get_str_md5',
 ]
 
 
@@ -190,3 +194,17 @@ def draw_facepose(canvas, kpts, kpt_valid):
                     canvas, (int(kpt[0]), int(kpt[1])),
                     3, (255, 255, 255), thickness=-1)
     return canvas
+
+
+def get_file_md5(file_path, nbytes=-1):
+    assert exists(file_path)
+
+    with open(file_path, 'rb') as f:
+        content = f.read(nbytes) if nbytes > 0 else f.read()
+        file_hash = hashlib.md5(content).hexdigest()
+
+    return file_hash
+
+
+def get_str_md5(string):
+    return hashlib.md5(string.encode("utf-8")).hexdigest()
