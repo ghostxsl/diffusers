@@ -16,7 +16,7 @@ __all__ = [
     'Resize', 'CenterCrop', 'RandomCrop',
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
-    'ColorJitter', 'DrawCanny', 'ResizePadToTensor',
+    'ColorJitter', 'DrawCanny', 'ResizePad',
 ]
 
 
@@ -515,7 +515,10 @@ class DrawPose(object):
         assert isinstance(data, dict)
 
         if 'condition' in data and 'image' in data:
-            data['condition_image'] = self.draw_pose(data['image'], data['condition'])
+            if isinstance(data['image'], (tuple, list)) and isinstance(data['condition'], (tuple, list)):
+                data['condition_image'] = [self.draw_pose(i, c) for i, c in zip(data['image'], data['condition'])]
+            else:
+                data['condition_image'] = self.draw_pose(data['image'], data['condition'])
         else:
             raise Exception(f"Not found keys: [`image`, `condition`]")
 
@@ -709,7 +712,7 @@ class DrawCanny(object):
         return f"{self.__class__.__name__}()"
 
 
-class ResizePadToTensor(object):
+class ResizePad(object):
     def __init__(self,
                  size,
                  interpolation='bilinear',
