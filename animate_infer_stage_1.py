@@ -19,18 +19,17 @@ device = torch.device("cuda")
 dtype = torch.float16
 stride = 4
 num_frames = 24
-H, W = 768, 768
+H, W = 1024, 768
 
-root_dir = "/xsl/wilson.xu/fashion_video"
+root_dir = "/xsl/wilson.xu/pidm_data_mini"
 
-csv_file = join(root_dir, "mini_train_png.csv")
-img_dir = join(root_dir, "train_png")
+pkl_file = join(root_dir, "mini_img.pkl")
+img_dir = join(root_dir, "train_img")
 pose_dir = join(root_dir, "train_pose")
 
 base_path = "/xsl/wilson.xu/weights/film"
 referencenet_model_path = "/xsl/wilson.xu/animate_xs_768/referencenet"
 controlnet_path = "/xsl/wilson.xu/animate_xs_768/controlnet"
-image_encoder_model_path = "/xsl/wilson.xu/weights/IP-Adapter/image_encoder"
 
 out_dir = "output"
 os.makedirs(out_dir, exist_ok=True)
@@ -77,39 +76,25 @@ def pad_image(img, pad_values=255):
 
 _draw = DrawPose(prob_hand=1.0, prob_face=0.0)
 def get_reference_pose_frame(video_list):
-    st_idx = random.randint(0, stride - 1)
-    samples_idx = list(range(st_idx, len(video_list), stride))
-    if len(samples_idx) >= num_frames:
-        st_idx = random.randint(0, len(samples_idx) - num_frames)
-        samples_idx = samples_idx[st_idx: st_idx + num_frames]
-    else:
-        samples_idx = samples_idx + [samples_idx[-1], ] * (num_frames - len(samples_idx))
+    item = random.choice(video_list)
 
-    name = video_list[random.choice(samples_idx)]
-    img = load_image(join(img_dir, name))
-
-    pose = pkl_load(join(pose_dir, splitext(name)[0] + '.pose'))
+    img = load_image(join(img_dir, item['image']))
+    pose = pkl_load(join(pose_dir, item['pose']))
     pose = _draw.draw_pose(img, pose)
 
-    img = pad_image(img)
-    pose = pad_image(pose, 0)
+    # img = pad_image(img)
+    # pose = pad_image(pose, 0)
 
-    ref_name = video_list[random.choice(samples_idx)]
-    reference_image = load_image(join(img_dir, ref_name))
-    reference_image = pad_image(reference_image)
+    video_list.remove(item)
+    ref_item = random.choice(video_list)
+    reference_image = load_image(join(img_dir, ref_item['image']))
+    # reference_image = pad_image(reference_image)
 
     return reference_image, pose, img
 
 
 if __name__ == '__main__':
-    metadata = pandas.read_csv(csv_file).values.tolist()
-    video_to_image = OrderedDict()
-    for name, captions in metadata:
-        video_name = name.split('_')[0]
-        if video_name not in video_to_image:
-            video_to_image[video_name] = [name]
-        else:
-            video_to_image[video_name].append(name)
+    metadata = pkl_load(pkl_file)
 
     controlnet = ControlNetXSModel.from_pretrained(controlnet_path).to(device, dtype=dtype)
     referencenet = ReferenceNetModel.from_pretrained(referencenet_model_path).to(device, dtype=dtype)
@@ -121,14 +106,14 @@ if __name__ == '__main__':
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 
     ind = 1
-    for k, v in video_to_image.items():
+    for k, v in metadata.items():
         print(f"{ind}: {k}")
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
         reference, pose, gt_img = get_reference_pose_frame(v)
         out = pipe(
-            prompt="woman posing for a photo, simple white background",
+            prompt="",
             reference_image=reference,
             control_image=pose,
             height=H,
@@ -140,8 +125,8 @@ if __name__ == '__main__':
             generator=generator,
         )
         out_img = np.concatenate(
-            [reference.resize((H, W), 1), pose.resize((H, W), 1),
-             gt_img.resize((H, W), 1), out[0]], axis=1)
+            [reference.resize((W, H), 1), pose.resize((W, H), 1),
+             gt_img.resize((W, H), 1), out[0]], axis=1)
         Image.fromarray(out_img).save(join(out_dir, k + '.png'))
         ind += 1
 

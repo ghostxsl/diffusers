@@ -13,7 +13,7 @@ import numpy as np
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
-    'pkl_save', 'pkl_load', 'json_save', 'json_load',
+    'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5',
 ]
@@ -87,6 +87,15 @@ def json_load(file):
     with open(file, 'r') as f:
         out = json.load(f)
     return out
+
+
+def load_file(file_path):
+    assert exists(file_path)
+
+    if splitext(file_path)[1] == ".json":
+        return json_load(file_path)
+    else:
+        return pkl_load(file_path)
 
 
 def draw_bodypose(canvas, kpts, kpt_valid, stickwidth=4,

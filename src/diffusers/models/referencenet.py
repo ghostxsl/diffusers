@@ -52,7 +52,7 @@ from .unets.unet_2d_blocks import (
     get_down_block,
     get_up_block,
 )
-from .transformer_2d import Transformer2DModelOutput
+from .transformers.transformer_2d import Transformer2DModelOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name

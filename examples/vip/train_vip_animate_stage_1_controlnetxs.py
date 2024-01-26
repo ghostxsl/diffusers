@@ -77,7 +77,7 @@ def parse_args():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
-        "--dataset_pkl",
+        "--dataset_file",
         type=str,
         default=None,
         required=True,
@@ -121,11 +121,11 @@ def parse_args():
     )
     parser.add_argument(
         "--resolution",
-        type=int,
-        default=768,
+        type=str,
+        default="1024x768",
         help=(
-            "The resolution for input images, all the images in the train dataset will be resized to this"
-            " resolution"
+            "The resolution(h x w) for input images, all the images in the train"
+            " dataset will be resized to this resolution"
         ),
     )
     parser.add_argument(
@@ -139,7 +139,7 @@ def parse_args():
         default=4,
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=300)
     parser.add_argument(
@@ -218,13 +218,6 @@ def parse_args():
     )
     parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
     parser.add_argument(
-        "--snr_gamma",
-        type=float,
-        default=None,
-        help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
-             "More details here: https://arxiv.org/abs/2303.09556.",
-    )
-    parser.add_argument(
         "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
     parser.add_argument(
@@ -281,6 +274,13 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--snr_gamma",
+        type=float,
+        default=None,
+        help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+             "More details here: https://arxiv.org/abs/2303.09556.",
+    )
+    parser.add_argument(
         "--caption",
         type=str,
         default="",
@@ -292,13 +292,30 @@ def parse_args():
             "Whether or not to use vos to train."
         ),
     )
+    parser.add_argument(
+        "--matting_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the matting data."
+        ),
+    )
+    parser.add_argument(
+        "--use_matting",
+        action="store_true",
+        help=(
+            "Whether or not to use matting data to train."
+        ),
+    )
 
     args = parser.parse_args()
 
-    if args.resolution % 8 != 0:
-        raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
-        )
+    if len(args.resolution.split("x")) == 1:
+        args.resolution = int(args.resolution)
+    elif len(args.resolution.split("x")) == 2:
+        args.resolution = [int(r) for r in args.resolution.split("x")]
+    else:
+        raise Exception(f"Error `resolution` type({type(args.resolution)}): {args.resolution}.")
 
     return args
 
@@ -479,7 +496,7 @@ def main(args):
 
     # Dataset and DataLoaders creation:
     train_dataset = AnimateDataset(
-        dataset_pkl=args.dataset_pkl,
+        dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
@@ -489,6 +506,8 @@ def main(args):
         stride=args.stride,
         caption=args.caption,
         use_vos=args.use_vos,
+        matting_data_dir=args.matting_data_dir,
+        use_matting=args.use_matting,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -635,12 +654,13 @@ def main(args):
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
                     # This is discussed in Section 4.2 of the same paper.
                     snr = compute_snr(noise_scheduler, timesteps)
-                    if noise_scheduler.config.prediction_type == "v_prediction":
-                        # Velocity objective requires that we add one to SNR values before we divide by them.
-                        snr = snr + 1
-                    mse_loss_weights = (
-                            torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
-                    )
+                    mse_loss_weights = torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
+                        dim=1
+                    )[0]
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        mse_loss_weights = mse_loss_weights / snr
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        mse_loss_weights = mse_loss_weights / (snr + 1)
 
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="none")
                     loss = loss.mean(dim=list(range(1, len(loss.shape)))) * mse_loss_weights

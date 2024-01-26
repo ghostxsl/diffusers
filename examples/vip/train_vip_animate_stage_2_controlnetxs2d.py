@@ -86,7 +86,7 @@ def parse_args():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
-        "--dataset_pkl",
+        "--dataset_file",
         type=str,
         default=None,
         required=True,
@@ -481,7 +481,7 @@ def main(args):
 
     # Dataset and DataLoaders creation:
     train_dataset = AnimateDataset(
-        dataset_pkl=args.dataset_pkl,
+        dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
         tokenizer=tokenizer,
