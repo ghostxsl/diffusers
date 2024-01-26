@@ -17,6 +17,7 @@ __all__ = [
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
     'ColorJitter', 'DrawCanny', 'ResizePad',
+    'PasteMatting',
 ]
 
 
@@ -337,7 +338,7 @@ class RandomHorizontalFlip(torch.nn.Module):
             if isinstance(img, dict):
                 for k, v in img.items():
                     if 'image' in k:
-                        if isinstance(v, (list, tuple)):
+                        if isinstance(v, Sequence):
                             v = [F.hflip(p) for p in v]
                             img[k] = v
                         else:
@@ -475,47 +476,51 @@ class Normalize(torch.nn.Module):
 
 class DrawPose(object):
     def __init__(self,
-                 hand=True,
-                 face=True,
+                 size=1024,
+                 prob_hand=0.5,
+                 prob_face=0.5,
                  body_kpt_thr=0.3,
                  hand_kpt_thr=0.3,
-                 face_kpt_thr=0.3,
-                 prob_hand=0.5,
-                 prob_face=0.5):
+                 face_kpt_thr=0.3):
         _log_api_usage_once(self)
-        self.hand = hand
-        self.face = face
+        self.size = size
+        self.prob_hand = prob_hand
+        self.prob_face = prob_face
         self.body_kpt_thr = body_kpt_thr
         self.hand_kpt_thr = hand_kpt_thr
         self.face_kpt_thr = face_kpt_thr
-        self.prob_hand = prob_hand
-        self.prob_face = prob_face
 
     def draw_pose(self, src_img, points_dict):
         _, height, width = F.get_dimensions(src_img)
-        canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
+        if self.size == -1:
+            canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
+            size_ = np.array([width, height])
+        else:
+            w = int(self.size / height * width) if self.size != height else width
+            canvas = np.zeros(shape=(self.size, w, 3), dtype=np.uint8)
+            size_ = np.array([w, self.size])
 
-        kpts = points_dict['body']['keypoints'][..., :2] * np.array([width, height])
+        kpts = points_dict['body']['keypoints'][..., :2] * size_
         kpt_valid = points_dict['body']['keypoints'][..., 2] > self.body_kpt_thr
         canvas = draw_bodypose(canvas, kpts, kpt_valid)
 
-        if self.hand and points_dict['hand'] is not None and random.random() <= self.prob_hand:
-            kpts = points_dict['hand']['keypoints'][..., :2] * np.array([width, height])
+        if points_dict['hand'] is not None and random.random() <= self.prob_hand:
+            kpts = points_dict['hand']['keypoints'][..., :2] * size_
             kpt_valid = points_dict['hand']['keypoints'][..., 2] > self.hand_kpt_thr
             canvas = draw_handpose(canvas, kpts, kpt_valid)
 
-        if self.face and points_dict['face'] is not None and random.random() <= self.prob_face:
-            kpts = points_dict['face']['keypoints'][..., :2] * np.array([width, height])
+        if points_dict['face'] is not None and random.random() <= self.prob_face:
+            kpts = points_dict['face']['keypoints'][..., :2] * size_
             kpt_valid = points_dict['face']['keypoints'][..., 2] > self.face_kpt_thr
             canvas = draw_facepose(canvas, kpts, kpt_valid)
 
-        return Image.fromarray(canvas)
+        return Image.fromarray(canvas).resize((width, height), Image.LANCZOS)
 
     def __call__(self, data):
         assert isinstance(data, dict)
 
         if 'condition' in data and 'image' in data:
-            if isinstance(data['image'], (tuple, list)) and isinstance(data['condition'], (tuple, list)):
+            if isinstance(data['image'], Sequence) and isinstance(data['condition'], Sequence):
                 data['condition_image'] = [self.draw_pose(i, c) for i, c in zip(data['image'], data['condition'])]
             else:
                 data['condition_image'] = self.draw_pose(data['image'], data['condition'])
@@ -525,7 +530,7 @@ class DrawPose(object):
         return data
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}()"
+        return f"{self.__class__.__name__}(draw_hand: {self.prob_hand}, draw_face: {self.prob_face})"
 
 
 class ColorJitter(torch.nn.Module):
@@ -574,7 +579,7 @@ class ColorJitter(torch.nn.Module):
             value = [center - float(value), center + float(value)]
             if clip_first_on_zero:
                 value[0] = max(value[0], 0.0)
-        elif isinstance(value, (tuple, list)) and len(value) == 2:
+        elif isinstance(value, Sequence) and len(value) == 2:
             value = [float(value[0]), float(value[1])]
         else:
             raise TypeError(f"{name} should be a single number or a list/tuple with length 2.")
@@ -716,6 +721,7 @@ class ResizePad(object):
     def __init__(self,
                  size,
                  interpolation='bilinear',
+                 padding=True,
                  pad_values=255):
         super().__init__()
         _log_api_usage_once(self)
@@ -725,6 +731,7 @@ class ResizePad(object):
             raise ValueError("If size is a sequence, it should have 2 values")
         self.size = size
         self.interpolation = interpolation
+        self.padding = padding
         self.pad_values = pad_values
 
     def resize_and_pad_pil(self, img, pad_values=255):
@@ -740,27 +747,30 @@ class ResizePad(object):
             else:
                 w = h = self.size
         elif isinstance(self.size, Sequence):
-            w, h = self.size[::-1]
+            h, w = self.size
+
         img = img.resize((w, h), resample=Image.LANCZOS)
 
-        # pad
-        img = np.array(img)
-        if w > h:
-            pad_ = w - h
-            img = np.pad(
-                img,
-                ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0)),
-                constant_values=pad_values
-            )
-        elif h > w:
-            pad_ = h - w
-            img = np.pad(
-                img,
-                ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0)),
-                constant_values=pad_values
-            )
+        if self.padding:
+            # pad
+            img = np.array(img)
+            if w > h:
+                pad_ = w - h
+                img = np.pad(
+                    img,
+                    ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0)),
+                    constant_values=pad_values
+                )
+            elif h > w:
+                pad_ = h - w
+                img = np.pad(
+                    img,
+                    ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0)),
+                    constant_values=pad_values
+                )
+            img = Image.fromarray(img)
 
-        return Image.fromarray(img)
+        return img
 
     def resize_and_pad_tensor(self, img, pad_values=255):
         h, w = img.shape[-2:]
@@ -775,7 +785,7 @@ class ResizePad(object):
             else:
                 w = h = self.size
         elif isinstance(self.size, Sequence):
-            w, h = self.size[::-1]
+            h, w = self.size
 
         if img.ndim == 3:
             img = img.unsqueeze(0)
@@ -794,21 +804,22 @@ class ResizePad(object):
                 antialias=True
             )
 
-        # pad
-        if w > h:
-            pad_ = w - h
-            img = torch.nn.functional.pad(
-                img,
-                (0, 0, pad_ // 2, pad_ - pad_ // 2),
-                value=pad_values / 255.
-            )
-        elif h > w:
-            pad_ = h - w
-            img = torch.nn.functional.pad(
-                img,
-                (pad_ // 2, pad_ - pad_ // 2, 0, 0),
-                value=pad_values / 255.
-            )
+        if self.padding:
+            # pad
+            if w > h:
+                pad_ = w - h
+                img = torch.nn.functional.pad(
+                    img,
+                    (0, 0, pad_ // 2, pad_ - pad_ // 2),
+                    value=pad_values / 255.
+                )
+            elif h > w:
+                pad_ = h - w
+                img = torch.nn.functional.pad(
+                    img,
+                    (pad_ // 2, pad_ - pad_ // 2, 0, 0),
+                    value=pad_values / 255.
+                )
 
         return img
 
@@ -822,7 +833,7 @@ class ResizePad(object):
                     elif isinstance(v, torch.Tensor):
                         img[k] = self.resize_and_pad_tensor(
                             v, self.pad_values if k != 'condition_image' else 0)
-                    elif isinstance(v, (list, tuple)) and isinstance(v[0], Image.Image):
+                    elif isinstance(v, Sequence) and isinstance(v[0], Image.Image):
                         v = [
                             self.resize_and_pad_pil(
                                 p, self.pad_values if k != 'condition_image' else 0) for p in v
@@ -838,3 +849,47 @@ class ResizePad(object):
     def __repr__(self) -> str:
         detail = f"(size={self.size}, interpolation={self.interpolation}"
         return f"{self.__class__.__name__}{detail}"
+
+
+class PasteMatting(object):
+    def __init__(self, bg_value=255):
+        _log_api_usage_once(self)
+        if isinstance(bg_value, (int, float)):
+            bg_value = int(bg_value)
+            bg_value = [bg_value, ] * 3
+        elif isinstance(bg_value, Sequence):
+            assert len(bg_value) == 3
+        else:
+            raise Exception(f"Error bg_value type: {type(bg_value)}")
+
+        self.bg_value = bg_value
+
+    def paste_matting(self, src_img, matting):
+        _, height, width = F.get_dimensions(src_img)
+        bg = np.ones(shape=(height, width, 3), dtype=np.float32) * np.array(self.bg_value)
+
+        src_img = np.array(src_img).astype(np.float32)
+        matting = np.array(matting).astype(np.float32) / 255.0
+
+        out_img = np.clip(matting * src_img + (1 - matting) * bg, 0, 255).astype(np.uint8)
+
+        return Image.fromarray(out_img)
+
+    def __call__(self, data):
+        assert isinstance(data, dict)
+
+        if 'matting' in data and 'image' in data:
+            if isinstance(data['image'], Sequence) and isinstance(data['matting'], Sequence):
+                data['image'] = [self.paste_matting(i, c) for i, c in zip(data['image'], data['matting'])]
+            else:
+                data['image'] = self.paste_matting(data['image'], data['matting'])
+
+            if 'reference_image' in data and 'reference_matting' in data:
+                data['reference_image'] = self.paste_matting(data['reference_image'], data['reference_matting'])
+        else:
+            raise Exception(f"Not found keys: [`image`, `condition`]")
+
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(bg_value: {self.bg_value})"
