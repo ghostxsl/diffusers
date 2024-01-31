@@ -55,10 +55,7 @@ class T2IDataset(torch.utils.data.Dataset):
         random_hflip=False,
         random_vflip=False,
         drop_text=0.1,
-        keep_in_memory=False
     ):
-        assert os.path.exists(dataset_csv)
-        assert os.path.exists(train_data_dir)
         if drop_text < 0. or drop_text > 1.:
             raise ValueError("`drop_text` must be in the range [0., 1.].")
 
@@ -66,18 +63,12 @@ class T2IDataset(torch.utils.data.Dataset):
         self.train_data_dir = train_data_dir
         self.tokenizer = tokenizer
         self.drop_text = drop_text
-        self.keep_in_memory = keep_in_memory
         self.empty_text_inputs = tokenizer(
             "", max_length=tokenizer.model_max_length,
             padding="max_length", truncation=True, return_tensors="pt")
 
-        self.metadata = pandas.read_csv(dataset_csv).values.tolist()
+        self.metadata = self.get_metadata(dataset_csv, train_data_dir)
         self._length = len(self.metadata)
-        self.image_list = []
-        if keep_in_memory:
-            for name, caption in tqdm(self.metadata):
-                img = load_image(join(train_data_dir, name))
-                self.image_list.append(img)
 
         self.image_transforms = tv_transforms.Compose(
             [
@@ -93,19 +84,27 @@ class T2IDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
+    def get_metadata(self, dataset_csv, train_data_dir):
+        print("Loading dataset...")
+        dataset_csv = dataset_csv.split(',')
+        train_data_dir = train_data_dir.split(',')
+
+        out = []
+        for csv_file, tdir in zip(dataset_csv, train_data_dir):
+            temp = pandas.read_csv(csv_file.strip()).values.tolist()
+            for name, caption in tqdm(temp):
+                out.append([join(tdir.strip(), name), caption])
+        return out
+
     def __getitem__(self, index):
         example = {}
-        if self.keep_in_memory:
-            example["pixel_values"] = self.image_transforms(self.image_list[index])
-        else:
-            name = self.metadata[index][0]
-            img = load_image(join(self.train_data_dir, name))
-            example["pixel_values"] = self.image_transforms(img)
+        img_path, captions = self.metadata[index]
+        img = load_image(img_path)
+        example["pixel_values"] = self.image_transforms(img)
 
         if random.random() < self.drop_text:
             text_inputs = self.empty_text_inputs
         else:
-            captions = self.metadata[index][1]
             text_inputs = self.tokenizer(
                 captions, max_length=self.tokenizer.model_max_length,
                 padding="max_length", truncation=True, return_tensors="pt"
