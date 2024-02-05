@@ -141,7 +141,7 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=1024,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
@@ -193,7 +193,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-4,
+        default=5e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -281,13 +281,13 @@ def parse_args():
     parser.add_argument(
         "--lora_rank",
         type=int,
-        default=64,
+        default=32,
         help="The rank of the LoRA projection matrix.",
     )
     parser.add_argument(
         "--lora_alpha",
         type=int,
-        default=8,
+        default=4,
         help="The rank of the LoRA projection matrix.",
     )
 
