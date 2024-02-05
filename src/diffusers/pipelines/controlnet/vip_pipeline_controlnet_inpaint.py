@@ -20,14 +20,13 @@ import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, MutableSequence
 
 import numpy as np
-import PIL.Image
-from PIL import ImageOps
+from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
-from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...image_processor import VaeImageProcessor
-from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin, IPAdapterMixin
 from ...models import AutoencoderKL, ControlNetModel, UNet2DConditionModel
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import (
@@ -39,7 +38,6 @@ from ...utils import (
 )
 from ...utils.torch_utils import is_compiled_module, randn_tensor
 from ..pipeline_utils import DiffusionPipeline
-from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from .multicontrolnet import MultiControlNetModel
 
 
@@ -106,18 +104,18 @@ EXAMPLE_DOC_STRING = """
 
 
 def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
-    assert isinstance(image, PIL.Image.Image)
-    assert isinstance(mask, PIL.Image.Image)
+    assert isinstance(image, Image.Image)
+    assert isinstance(mask, Image.Image)
 
     # preprocess mask
-    mask = mask.convert("L").resize((width, height), resample=PIL.Image.LANCZOS)
+    mask = mask.convert("L").resize((width, height), resample=Image.LANCZOS)
 
     mask_overlay = np.array(mask, dtype=np.float32) * 2
-    mask_overlay = PIL.Image.fromarray(np.clip(mask_overlay, 0, 255).astype(np.uint8))
+    mask_overlay = Image.fromarray(np.clip(mask_overlay, 0, 255).astype(np.uint8))
 
     # preprocess image
-    image = image.resize((width, height), resample=PIL.Image.LANCZOS)
-    image_overlay = PIL.Image.new('RGBa', (width, height))
+    image = image.resize((width, height), resample=Image.LANCZOS)
+    image_overlay = Image.new('RGBa', (width, height))
     image_overlay.paste(image.convert("RGBA").convert("RGBa"),
                        mask=ImageOps.invert(mask_overlay))
     image_overlay = image_overlay.convert("RGBA")
@@ -133,7 +131,7 @@ def prepare_mask_and_masked_image(image, mask, height, width, **kwargs):
     return mask, masked_image, image, image_overlay
 
 
-class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
+class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion with ControlNet guidance.
 
@@ -172,13 +170,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
-        safety_checker ([`StableDiffusionSafetyChecker`]):
-            Classification module that estimates whether generated images could be considered offensive or harmful.
-            Please, refer to the [model card](https://huggingface.co/runwayml/stable-diffusion-v1-5) for details.
         feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
-    _optional_components = ["safety_checker", "feature_extractor"]
+    _optional_components = ["feature_extractor", "image_encoder"]
 
     def __init__(
         self,
@@ -188,27 +183,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         unet: UNet2DConditionModel,
         controlnet: Union[ControlNetModel, List[ControlNetModel], Tuple[ControlNetModel], MultiControlNetModel],
         scheduler: KarrasDiffusionSchedulers,
-        safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
-        requires_safety_checker: bool = True,
+        image_encoder: Optional[CLIPVisionModelWithProjection] = None,
     ):
         super().__init__()
-
-        if safety_checker is None and requires_safety_checker:
-            logger.warning(
-                f"You have disabled the safety checker for {self.__class__} by passing `safety_checker=None`. Ensure"
-                " that you abide to the conditions of the Stable Diffusion license and do not expose unfiltered"
-                " results in services or applications open to the public. Both the diffusers team and Hugging Face"
-                " strongly recommend to keep the safety filter enabled in all public facing circumstances, disabling"
-                " it only for use-cases that involve analyzing network behavior or auditing its results. For more"
-                " information, please have a look at https://github.com/huggingface/diffusers/pull/254 ."
-            )
-
-        if safety_checker is not None and feature_extractor is None:
-            raise ValueError(
-                "Make sure to define a feature extractor when loading {self.__class__} if you want to use the safety"
-                " checker. If you do not want to use the safety checker, you can pass `'safety_checker=None'` instead."
-            )
 
         if isinstance(controlnet, (list, tuple)):
             controlnet = MultiControlNetModel(controlnet)
@@ -220,15 +198,14 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             unet=unet,
             controlnet=controlnet,
             scheduler=scheduler,
-            safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
         )
-        self.register_to_config(requires_safety_checker=requires_safety_checker)
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
@@ -284,9 +261,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae, self.controlnet]:
             cpu_offload(cpu_offloaded_model, device)
 
-        if self.safety_checker is not None:
-            cpu_offload(self.safety_checker, execution_device=device, offload_buffers=True)
-
     def enable_model_cpu_offload(self, gpu_id=0):
         r"""
         Offloads all models to CPU using accelerate, reducing memory usage with a low impact on performance. Compared
@@ -304,10 +278,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         hook = None
         for cpu_offloaded_model in [self.text_encoder, self.unet, self.vae]:
             _, hook = cpu_offload_with_hook(cpu_offloaded_model, device, prev_module_hook=hook)
-
-        if self.safety_checker is not None:
-            # the safety checker can offload the vae again
-            _, hook = cpu_offload_with_hook(self.safety_checker, device, prev_module_hook=hook)
 
         # control net hook has be manually offloaded as it alternates with unet
         cpu_offload_with_hook(self.controlnet, device)
@@ -385,7 +355,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(num_images_per_prompt, pos_len, -1)
 
-
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance:
             if negative_prompt_embeds is None:
@@ -407,30 +376,33 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 elif neg_len > pos_len:
                     pad_embed = prompt_embeds[:, -1].unsqueeze(1).repeat(1, diff_len, 1)
                     prompt_embeds = torch.cat([prompt_embeds, pad_embed], dim=1)
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
-            if neg_len == pos_len:
-                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
-            else:
-                prompt_embeds = [negative_prompt_embeds, prompt_embeds]
 
-        return prompt_embeds
+        return negative_prompt_embeds, prompt_embeds
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.run_safety_checker
-    def run_safety_checker(self, image, device, dtype):
-        if self.safety_checker is None:
-            has_nsfw_concept = None
-        else:
-            if torch.is_tensor(image):
-                feature_extractor_input = self.image_processor.postprocess(image, output_type="pil")
-            else:
-                feature_extractor_input = self.image_processor.numpy_to_pil(image)
-            safety_checker_input = self.feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
-            image, has_nsfw_concept = self.safety_checker(
-                images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
-            )
-        return image, has_nsfw_concept
+    def encode_image(
+            self,
+            image,
+            num_images_per_prompt,
+            device,
+            dtype,
+            do_classifier_free_guidance=False
+    ):
+        uncond_image_embeds = None
+        if do_classifier_free_guidance:
+            uncond_image = Image.new("RGB", image.size)
+
+        image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+        image = image.to(device=device, dtype=dtype)
+        image_embeds = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
+        image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+
+        if do_classifier_free_guidance:
+            uncond_image = self.feature_extractor(images=uncond_image, return_tensors="pt").pixel_values
+            uncond_image = uncond_image.to(device=device, dtype=dtype)
+            uncond_image_embeds = self.image_encoder(uncond_image, output_hidden_states=True).hidden_states[-2]
+            uncond_image_embeds = uncond_image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+
+        return image_embeds, uncond_image_embeds
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.decode_latents
     def decode_latents(self, latents):
@@ -593,8 +565,8 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 raise ValueError(f"control guidance end: {end} can't be larger than 1.0.")
 
     def check_image(self, image, prompt):
-        image_is_pil = isinstance(image, PIL.Image.Image)
-        image_is_pil_list = isinstance(image, list) and isinstance(image[0], PIL.Image.Image)
+        image_is_pil = isinstance(image, Image.Image)
+        image_is_pil_list = isinstance(image, list) and isinstance(image[0], Image.Image)
 
         if (
             not image_is_pil
@@ -628,16 +600,11 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         num_images_per_prompt,
         device,
         dtype,
-        do_classifier_free_guidance=False,
-        guess_mode=False,
     ):
         image = self.control_image_processor.preprocess(
             image, height=height, width=width).to(dtype=torch.float32)
         image = image.repeat_interleave(num_images_per_prompt, dim=0)
         image = image.to(device=device, dtype=dtype)
-
-        if do_classifier_free_guidance and not guess_mode:
-            image = torch.cat([image] * 2)
 
         return image
 
@@ -700,7 +667,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint.StableDiffusionInpaintPipeline.prepare_mask_latents
     def prepare_mask_latents(
-        self, mask, masked_image, batch_size, height, width, dtype, device, generator, do_classifier_free_guidance
+        self, mask, masked_image, batch_size, height, width, dtype, device, generator
     ):
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
@@ -732,11 +699,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                     " Make sure the number of images that you pass is divisible by the total requested batch size."
                 )
             masked_image_latents = masked_image_latents.repeat(batch_size // masked_image_latents.shape[0], 1, 1, 1)
-
-        mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
-        masked_image_latents = (
-            torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
-        )
 
         # aligning device to prevent device errors when concating it with the latent model input
         masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
@@ -831,18 +793,19 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        prompt: str = '',
-        negative_prompt: str = '',
-        image: PIL.Image.Image = None,
-        mask_image: PIL.Image.Image = None,
+        prompt: str = "",
+        negative_prompt: str = "",
+        image: Image.Image = None,
+        mask_image: Image.Image = None,
         control_image: Union[
-            PIL.Image.Image,
-            List[PIL.Image.Image],
+            Image.Image,
+            List[Image.Image],
         ] = None,
+        ip_adapter_image: Optional[Image.Image] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         strength: float = 0.75,
-        num_inference_steps: int = 50,
+        num_inference_steps: int = 25,
         guidance_scale: float = 7.5,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
@@ -854,7 +817,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_conditioning_scale: Union[float, List[float]] = 1.0,
-        guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
         padding_prompt: bool = False,
@@ -932,9 +894,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 to the residual in the original unet. If multiple ControlNets are specified in init, you can set the
                 corresponding scale as a list. Note that by default, we use a smaller conditioning scale for inpainting
                 than for [`~StableDiffusionControlNetPipeline.__call__`].
-            guess_mode (`bool`, *optional*, defaults to `False`):
-                In this mode, the ControlNet encoder will try best to recognize the content of the input image even if
-                you remove all prompts. The `guidance_scale` between 3.0 and 5.0 is recommended.
             control_guidance_start (`float` or `List[float]`, *optional*, defaults to 0.0):
                 The percentage of total steps at which the controlnet starts applying.
             control_guidance_end (`float` or `List[float]`, *optional*, defaults to 1.0):
@@ -986,18 +945,11 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         if isinstance(controlnet, MultiControlNetModel) and isinstance(controlnet_conditioning_scale, float):
             controlnet_conditioning_scale = [controlnet_conditioning_scale] * len(controlnet.nets)
 
-        global_pool_conditions = (
-            controlnet.config.global_pool_conditions
-            if isinstance(controlnet, ControlNetModel)
-            else controlnet.nets[0].config.global_pool_conditions
-        )
-        guess_mode = guess_mode or global_pool_conditions
-
         # 3. Encode input prompt
         text_encoder_lora_scale = (
             cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
         )
-        prompt_embeds = self._encode_prompt(
+        negative_prompt_embeds, prompt_embeds = self._encode_prompt(
             prompt,
             negative_prompt,
             device,
@@ -1008,14 +960,9 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             padding_prompt=padding_prompt,
             lora_scale=text_encoder_lora_scale,
         )
-        if isinstance(prompt_embeds, list):
-            prompt_embeds_dtype = prompt_embeds[0].dtype
-            is_prompt_batch = False
-        else:
-            prompt_embeds_dtype = prompt_embeds.dtype
-            is_prompt_batch = True
+        prompt_embeds_dtype = prompt_embeds.dtype
 
-        # 4. Prepare image
+        # 4. Prepare control image
         if isinstance(controlnet, ControlNetModel):
             control_image = self.prepare_control_image(
                 image=control_image,
@@ -1024,8 +971,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 num_images_per_prompt=num_images_per_prompt,
                 device=device,
                 dtype=controlnet.dtype,
-                do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
-                guess_mode=guess_mode,
             ) if controlnet_conditioning_scale != 0 else None
         elif isinstance(controlnet, MultiControlNetModel):
             control_images = []
@@ -1037,8 +982,6 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                     num_images_per_prompt=num_images_per_prompt,
                     device=device,
                     dtype=controlnet.dtype,
-                    do_classifier_free_guidance=do_classifier_free_guidance and is_prompt_batch,
-                    guess_mode=guess_mode,
                 ) if control_scale_ != 0 else None
                 control_images.append(control_image_)
 
@@ -1046,7 +989,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         else:
             assert False
 
-        # 4. Preprocess mask and image - resizes image and mask w.r.t height and width
+        # 4.1 Preprocess mask and image - resizes image and mask w.r.t height and width
         mask, masked_image, init_image, image_overlay = prepare_mask_and_masked_image(
             image, mask_image, height, width, **kwargs
         )
@@ -1071,8 +1014,18 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             prompt_embeds_dtype,
             device,
             generator,
-            do_classifier_free_guidance and is_prompt_batch,
         )
+
+        # 6.1 Add image embeds for IP-Adapter
+        image_embeds, uncond_image_embeds = None, None
+        if ip_adapter_image is not None:
+            image_embeds, uncond_image_embeds = self.encode_image(
+                ip_adapter_image,
+                num_images_per_prompt,
+                device,
+                prompt_embeds_dtype,
+                do_classifier_free_guidance,
+            )
 
         # 7. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
@@ -1120,75 +1073,56 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                         if enhance_scale[i] >= 0:
                             latents = torch.lerp(grey_latent, latents, enhance_scale[i])
 
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance and is_prompt_batch else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                # scale the latents
+                latent_model_input = self.scheduler.scale_model_input(latents, t)
 
                 # controlnet(s) inference
-                if guess_mode and do_classifier_free_guidance:
-                    # Infer ControlNet only for the conditional batch.
-                    control_model_input = latents
-                    control_model_input = self.scheduler.scale_model_input(control_model_input, t)
-                    controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
-                else:
-                    control_model_input = latent_model_input
-                    controlnet_prompt_embeds = prompt_embeds
-
                 if isinstance(controlnet_keep[i], list):
                     cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
                 else:
                     cond_scale = controlnet_conditioning_scale * controlnet_keep[i]
 
-                if is_prompt_batch:
+                if not do_classifier_free_guidance:
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
-                        control_model_input,
+                        latent_model_input,
                         t,
-                        encoder_hidden_states=controlnet_prompt_embeds,
+                        encoder_hidden_states=prompt_embeds,
                         controlnet_cond=control_image,
                         conditioning_scale=cond_scale,
-                        guess_mode=guess_mode,
                         return_dict=False,
                     )
                 else:
                     # forward twice
                     down_neg, mid_neg = self.controlnet(
-                        control_model_input,
+                        latent_model_input,
                         t,
-                        encoder_hidden_states=controlnet_prompt_embeds[0],
+                        encoder_hidden_states=negative_prompt_embeds,
                         controlnet_cond=control_image,
                         conditioning_scale=cond_scale,
-                        guess_mode=guess_mode,
                         return_dict=False,
                     )
                     down_pos, mid_pos = self.controlnet(
-                        control_model_input,
+                        latent_model_input,
                         t,
-                        encoder_hidden_states=controlnet_prompt_embeds[1],
+                        encoder_hidden_states=prompt_embeds,
                         controlnet_cond=control_image,
                         conditioning_scale=cond_scale,
-                        guess_mode=guess_mode,
                         return_dict=False,
                     )
                     down_block_res_samples = [down_neg, down_pos]
                     mid_block_res_sample = [mid_neg, mid_pos]
 
-                if guess_mode and do_classifier_free_guidance:
-                    # Infered ControlNet only for the conditional batch.
-                    # To apply the output of ControlNet to both the unconditional and conditional batches,
-                    # add 0 to the unconditional batch to keep it unchanged.
-                    down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
-                    mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
-
                 # predict the noise residual
                 if num_channels_unet == 9:
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
-                if is_prompt_batch:
+                if not do_classifier_free_guidance:
                     noise_pred = self.unet(
                         latent_model_input,
                         t,
                         encoder_hidden_states=prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
+                        added_cond_kwargs={'image_embeds': image_embeds} if ip_adapter_image is not None else None,
                         down_block_additional_residuals=down_block_res_samples,
                         mid_block_additional_residual=mid_block_res_sample,
                         return_dict=False,
@@ -1198,8 +1132,9 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                     noise_pred_neg = self.unet(
                         latent_model_input,
                         t,
-                        encoder_hidden_states=prompt_embeds[0],
+                        encoder_hidden_states=negative_prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
+                        added_cond_kwargs={'image_embeds': uncond_image_embeds} if ip_adapter_image is not None else None,
                         down_block_additional_residuals=down_block_res_samples[0],
                         mid_block_additional_residual=mid_block_res_sample[0],
                         return_dict=False,
@@ -1207,8 +1142,9 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                     noise_pred_pos = self.unet(
                         latent_model_input,
                         t,
-                        encoder_hidden_states=prompt_embeds[1],
+                        encoder_hidden_states=prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
+                        added_cond_kwargs={'image_embeds': image_embeds} if ip_adapter_image is not None else None,
                         down_block_additional_residuals=down_block_res_samples[1],
                         mid_block_additional_residual=mid_block_res_sample[1],
                         return_dict=False,
@@ -1217,7 +1153,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
 
                 # compute predicted original sample (x_0) from sigma-scaled predicted noise
                 pred_original_sample = self.scheduler.get_pred_original_sample(
-                    noise_pred, t, latents.tile([2, 1, 1, 1]) if do_classifier_free_guidance else latents)
+                    noise_pred, t, torch.cat([latents] * 2) if do_classifier_free_guidance else latents)
 
                 # perform guidance
                 if do_classifier_free_guidance:

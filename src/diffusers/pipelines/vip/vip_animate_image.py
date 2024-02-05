@@ -23,7 +23,7 @@ from PIL import Image
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...image_processor import VaeImageProcessor
-from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin, IPAdapterMixin
 from ...models import AutoencoderKL, UNet2DConditionModel, ControlNetModel
 from ...schedulers import (
     DDIMScheduler,
@@ -74,7 +74,7 @@ def tensor2vid(video: torch.Tensor, processor, output_type="np"):
     return outputs
 
 
-class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
+class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
     model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
     _optional_components = ["feature_extractor", "image_encoder"]
 
@@ -217,7 +217,7 @@ class VIPAnimateImagePipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         if do_classifier_free_guidance:
             uncond_image = self.feature_extractor(images=uncond_image, return_tensors="pt").pixel_values
             uncond_image = uncond_image.to(device=device, dtype=dtype)
-            uncond_image_embeds = self.image_encoder(uncond_image)[0]
+            uncond_image_embeds = self.image_encoder(uncond_image, output_hidden_states=True).hidden_states[-2]
             uncond_image_embeds = uncond_image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
 
         return image_embeds, uncond_image_embeds
