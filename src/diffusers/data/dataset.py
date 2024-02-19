@@ -398,9 +398,9 @@ class ConPoseDataset(torch.utils.data.Dataset):
 
         out = []
         for csv_file, tdir, cdir in zip(dataset_csv, train_data_dir, condition_data_dir):
-            temp = pandas.read_csv(csv_file.strip()).values.tolist()
-            for name, caption in tqdm(temp):
-                out.append([join(tdir, name), join(cdir, splitext(name)[0] + '.pose'), caption])
+            temp_list = pandas.read_csv(csv_file.strip()).values.tolist()
+            for name, caption in tqdm(temp_list):
+                out.append([join(tdir.strip(), name), join(cdir.strip(), splitext(name)[0] + '.pose'), caption])
         return out
 
     def __getitem__(self, index):
