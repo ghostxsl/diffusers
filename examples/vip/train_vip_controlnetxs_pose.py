@@ -55,24 +55,13 @@ def parse_args():
         type=str,
         default=None,
         required=True,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
+        help="Path to pretrained model.",
     )
     parser.add_argument(
         "--controlnet_model_path",
         type=str,
         default=None,
-        help="Path to pretrained controlnet model or model identifier from huggingface.co/models."
-        " If not specified controlnet weights are initialized from unet.",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        required=False,
-        help=(
-            "Revision of pretrained model identifier from huggingface.co/models. Trainable model components should be"
-            " float32 precision."
-        ),
+        help="Path to pretrained controlnet model.",
     )
     parser.add_argument(
         "--output_dir",
@@ -115,14 +104,14 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=1024,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=56, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -134,7 +123,7 @@ def parse_args():
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=50000,
+        default=10000,
         help=(
             "Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`. "
             "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
@@ -236,7 +225,7 @@ def parse_args():
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default=None,
+        default="fp16",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -347,18 +336,17 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
         subfolder="tokenizer",
-        revision=args.revision,
         use_fast=False,
     )
     text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_model_path, subfolder="text_encoder", revision=args.revision
+        args.pretrained_model_path, subfolder="text_encoder",
     )
 
     # Load scheduler,  and models
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae", revision=args.revision)
+    vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_path, subfolder="unet", revision=args.revision
+        args.pretrained_model_path, subfolder="unet"
     )
 
     if args.controlnet_model_path:
