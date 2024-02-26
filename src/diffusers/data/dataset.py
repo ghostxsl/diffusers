@@ -35,7 +35,7 @@ from .vos_client import VOSClient
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
-    'AnimateDataset'
+    'AnimateDataset', 'ImageVariationDataset'
 ]
 
 
@@ -743,5 +743,72 @@ class AnimateDataset(torch.utils.data.Dataset):
         if self.clip_processor is not None:
             example["reference_image"] = self.clip_processor(
                 images=data["reference_image"], return_tensors="pt").pixel_values
+
+        return example
+
+
+class ImageVariationDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_file,
+            train_data_dir,
+            image_embedding_dir,
+            img_size=512,
+            drop_text=0.1,
+            use_vos=False,
+    ):
+        if drop_text < 0. or drop_text > 1.:
+            raise ValueError("`drop_text` must be in the range [0., 1.].")
+
+        self.train_data_dir = train_data_dir
+        self.image_embedding_dir = image_embedding_dir
+        self.drop_text = drop_text
+        self.use_vos = use_vos
+
+        self.metadata = self.get_metadata(dataset_file, train_data_dir, image_embedding_dir)
+        self._length = len(self.metadata)
+
+        if use_vos:
+            self.vos = VOSClient()
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                RandomCrop(img_size),
+                RandomHorizontalFlip(),
+                ToTensor(),
+                Normalize([0.5], [0.5], inplace=True),
+            ]
+        )
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file, train_data_dir, image_embedding_dir):
+        print("Loading dataset...")
+        dataset_file = [a.strip() for a in dataset_file.split(',')]
+        train_data_dir = [a.strip() for a in train_data_dir.split(',')]
+        image_embedding_dir = [a.strip() for a in image_embedding_dir.split(',')]
+
+        out = []
+        for file, tdir, idir in zip(dataset_file, train_data_dir, image_embedding_dir):
+            temp_list = load_file(file)
+            for name in tqdm(temp_list):
+                out.append([join(tdir, name), join(idir, splitext(name)[0] + '.npy')])
+
+        return out
+
+    def __getitem__(self, index):
+        example = {}
+        img_path, embed_path = self.metadata[index]
+
+        data = load_image(img_path)
+        example["pixel_values"] = self.image_transforms(data)
+        image_embeds = torch.from_numpy(np.load(embed_path))
+
+        if random.random() < self.drop_text:
+            example["image_embeds"] = torch.zeros_like(image_embeds)
+        else:
+            example["image_embeds"] = image_embeds
 
         return example
