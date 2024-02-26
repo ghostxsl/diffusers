@@ -7,12 +7,14 @@ import math
 import torch
 import json
 import pickle
+import pandas
 import matplotlib
 import numpy as np
 
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
+    'i2i_collate_fn',
     'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5',
@@ -67,6 +69,15 @@ def animate_collate_fn(examples):
     }
 
 
+def i2i_collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    image_embeds = torch.stack([example["image_embeds"] for example in examples])
+    image_embeds = image_embeds.to(memory_format=torch.contiguous_format).float()
+    return {"pixel_values": pixel_values, "image_embeds": image_embeds}
+
+
 def pkl_save(obj, file):
     with open(file, 'wb') as f:
         pickle.dump(obj, f)
@@ -94,6 +105,8 @@ def load_file(file_path):
 
     if splitext(file_path)[1] == ".json":
         return json_load(file_path)
+    elif splitext(file_path)[1] == ".csv":
+        return pandas.read_csv(file_path).values.tolist()
     else:
         return pkl_load(file_path)
 
