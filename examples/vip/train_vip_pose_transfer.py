@@ -39,21 +39,16 @@ from diffusers import (
     DDPMScheduler,
     UNet2DConditionModel,
 )
-from diffusers.models.embeddings import ImageProjection
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr, cast_training_params
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.data import ImageVariationDataset, i2i_collate_fn
+from diffusers.data import PoseTransDataset, animate_collate_fn
+from diffusers.models.reference_attention import ReferenceAttentionControl
+from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.controlnetxs import ControlNetXSModel
 
 
 logger = get_logger(__name__)
-
-
-def train_unet_cross_attn(unet):
-    for name, param in unet.named_parameters():
-        if 'attn2' in name or 'encoder_hid_proj' in name:
-            param.requires_grad = True
-    return unet
 
 
 def parse_args():
@@ -65,14 +60,19 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
-        "--train_cross_attn",
-        action="store_true",
-        help=(" "),
+        "--controlnet_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--referencenet_model_path",
+        type=str,
+        default=None,
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="image_variation",
+        default="animate_model",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -97,11 +97,13 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--image_embedding_dir",
+        "--condition_data_dir",
         type=str,
         default=None,
         help=(
-            "A folder containing the training image embedding."
+            "A folder containing the conditional training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
         ),
     )
     parser.add_argument(
@@ -118,15 +120,25 @@ def parse_args():
     )
     parser.add_argument(
         "--resolution",
-        type=int,
-        default=1024,
+        type=str,
+        default="768x576",
         help=(
-            "The resolution for input images, all the images in the train"
+            "The resolution(h x w) for input images, all the images in the train"
             " dataset will be resized to this resolution"
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
+        "--num_frames",
+        type=int,
+        default=24,
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=300)
     parser.add_argument(
@@ -188,7 +200,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="cosine",
+        default="constant",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
@@ -274,13 +286,30 @@ def parse_args():
             "Whether or not to use vos to train."
         ),
     )
+    parser.add_argument(
+        "--matting_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the matting data."
+        ),
+    )
+    parser.add_argument(
+        "--use_matting",
+        action="store_true",
+        help=(
+            "Whether or not to use matting data to train."
+        ),
+    )
 
     args = parser.parse_args()
 
-    if args.resolution % 8 != 0:
-        raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
-        )
+    if len(args.resolution.split("x")) == 1:
+        args.resolution = int(args.resolution)
+    elif len(args.resolution.split("x")) == 2:
+        args.resolution = [int(r) for r in args.resolution.split("x")]
+    else:
+        raise Exception(f"Error `resolution` type({type(args.resolution)}): {args.resolution}.")
 
     return args
 
@@ -325,14 +354,26 @@ def main(args):
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
 
-                model.save_pretrained(join(output_dir, "unet"))
+                if isinstance(model, ControlNetXSModel):
+                    sub_dir = "controlnet"
+                elif isinstance(model, ReferenceNetModel):
+                    sub_dir = "referencenet"
+                else:
+                    sub_dir = "unet"
+                model.save_pretrained(join(output_dir, sub_dir))
 
     def load_model_hook(models, input_dir):
         while len(models) > 0:
             # pop models so that they are not loaded again
             model = models.pop()
 
-            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+            if isinstance(model, ControlNetXSModel):
+                # load diffusers style into model
+                load_model = ControlNetXSModel.from_pretrained(input_dir, subfolder="controlnet")
+            elif isinstance(model, ReferenceNetModel):
+                load_model = ReferenceNetModel.from_pretrained(input_dir, subfolder="referencenet")
+            else:
+                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
             model.register_to_config(**load_model.config)
             model.load_state_dict(load_model.state_dict())
             del load_model
@@ -348,6 +389,10 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
+    # import correct image encoder class
+    feature_extractor = CLIPImageProcessor()
+    image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.pretrained_model_path, subfolder="image_encoder")
+
     # Load scheduler and models
     # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     noise_scheduler = DDPMScheduler(
@@ -361,25 +406,34 @@ def main(args):
         rescale_betas_zero_snr=True,
     )
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_path,
-        subfolder="unet",
-    )
-    if args.train_cross_attn:
-        unet.config.encoder_hid_dim_type = "image_proj"
-        unet.config.encoder_hid_dim = 1024
-        unet.encoder_hid_proj = ImageProjection(
-            image_embed_dim=unet.config.encoder_hid_dim,
-            cross_attention_dim=unet.config.cross_attention_dim,
-        )
+    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
-    # Move vae, unet to device and cast to weight_dtype
+    # Load ControlNet
+    if args.controlnet_model_path:
+        logger.info("Loading existing controlnet weights")
+        controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path)
+    else:
+        logger.info("Initializing controlnet weights")
+        controlnet = ControlNetXSModel.init_original(unet, is_sdxl=False)
+
+    # Load ReferenceNet
+    if args.referencenet_model_path:
+        logger.info("Loading existing referencenet weights")
+        referencenet = ReferenceNetModel.from_pretrained(args.referencenet_model_path)
+    else:
+        logger.info("Initializing referencenet weights from unet")
+        referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
+
+    image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
+    # unet.requires_grad_(False)
+    # train_unet_cross_attn(unet)
+    # cast_training_params(unet)
+    # unet.to(accelerator.device, dtype=weight_dtype)
+
+    # Move vae, unet and text_encoder to device and cast to weight_dtype
+    image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
-    if args.train_cross_attn:
-        unet.requires_grad_(False)
-        train_unet_cross_attn(unet)
-        cast_training_params(unet)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -391,11 +445,13 @@ def main(args):
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
+            controlnet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
+        referencenet.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -421,7 +477,12 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = [p for p in unet.parameters() if p.requires_grad]
+    unet_params = [p for p in unet.parameters() if p.requires_grad]
+    params_to_clip = list(controlnet.parameters()) + list(referencenet.parameters()) + unet_params
+    params_to_optimize = [
+        {"params": list(referencenet.parameters()) + unet_params},
+        {"params": list(controlnet.parameters()), "lr": args.learning_rate}
+    ]
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -431,24 +492,31 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = ImageVariationDataset(
+    train_dataset = PoseTransDataset(
         dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
-        image_embedding_dir=args.image_embedding_dir,
+        condition_data_dir=args.condition_data_dir,
+        clip_processor=feature_extractor,
         img_size=args.resolution,
         drop_text=args.drop_text,
+        num_frames=args.num_frames,
+        stride=args.stride,
         use_vos=args.use_vos,
+        matting_data_dir=args.matting_data_dir,
+        use_matting=args.use_matting,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=i2i_collate_fn,
+        collate_fn=animate_collate_fn,
         num_workers=args.dataloader_num_workers,
         drop_last=True,
         pin_memory=True,
     )
+
+    reference_control_reader = ReferenceAttentionControl(unet, fusion_blocks='full')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -460,15 +528,15 @@ def main(args):
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet, referencenet, optimizer, train_dataloader, lr_scheduler
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -528,9 +596,11 @@ def main(args):
     )
 
     unet.train()
+    controlnet.train()
+    referencenet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate(unet, controlnet, referencenet):
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
@@ -546,14 +616,23 @@ def main(args):
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Get the text embedding for conditioning
-                image_embeds = batch["image_embeds"].to(dtype=weight_dtype)
+                # Get the image embedding for conditioning
+                encoder_hidden_states = image_encoder(batch["reference_image"].to(dtype=weight_dtype)).image_embeds.unsqueeze(1)
 
-                model_pred = unet(
+                # reference image latents
+                reference_latents = vae.encode(batch["reference_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                reference_latents = reference_latents * vae.config.scaling_factor
+                # run referencenet
+                referencenet(reference_latents, timesteps, encoder_hidden_states)
+                reference_control_reader.update(referencenet, dtype=weight_dtype)
+
+                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                model_pred = controlnet(
+                    base_model=accelerator.unwrap_model(unet),
                     sample=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=None,
-                    added_cond_kwargs={'image_embeds': image_embeds},
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet_image,
                     return_dict=False,
                 )[0]
 
@@ -586,7 +665,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
@@ -634,6 +713,12 @@ def main(args):
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         unet.save_pretrained(os.path.join(args.output_dir, "unet"))
+
+        controlnet = accelerator.unwrap_model(controlnet)
+        controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
+
+        referencenet = accelerator.unwrap_model(referencenet)
+        referencenet.save_pretrained(os.path.join(args.output_dir, "referencenet"))
 
         noise_scheduler.save_config(os.path.join(args.output_dir, "scheduler"))
 
