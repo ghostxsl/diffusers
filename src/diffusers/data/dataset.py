@@ -35,7 +35,7 @@ from .vos_client import VOSClient
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
-    'AnimateDataset', 'ImageVariationDataset'
+    'AnimateDataset', 'PoseTransDataset', 'ImageVariationDataset',
 ]
 
 
@@ -747,6 +747,255 @@ class AnimateDataset(torch.utils.data.Dataset):
         return example
 
 
+class PoseTransDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_file,
+            train_data_dir,
+            condition_data_dir,
+            clip_processor,
+            matting_data_dir=None,
+            use_matting=False,
+            img_size=512,
+            drop_text=0.1,
+            num_frames=24,
+            stride=4,
+            overlap_frame=8,
+            is_video=False,
+            caption="",
+            use_vos=False,
+    ):
+        if drop_text < 0. or drop_text > 1.:
+            raise ValueError("`drop_text` must be in the range [0., 1.].")
+
+        self.train_data_dir = train_data_dir
+        self.condition_data_dir = condition_data_dir
+        self.matting_data_dir = matting_data_dir
+        self.use_matting = use_matting
+        self.clip_processor = clip_processor
+        self.drop_text = drop_text
+        self.num_frames = num_frames
+        self.stride = stride
+        self.sample_stride = num_frames - overlap_frame
+        self.is_video = is_video
+        self.caption = caption
+        self.use_vos = use_vos
+        self.clip_length = (self.num_frames - 1) * self.stride + 1
+
+        self.metadata = self.get_metadata(dataset_file)
+
+        if is_video:
+            self.video_list = self.get_frames_name_list(self.metadata)
+            self._length = len(self.video_list)
+        else:
+            self.item_list = []
+            for k, items in tqdm(self.metadata.items()):
+                self.item_list.extend([(k, item) for item in items])
+            self._length = len(self.item_list)
+
+        if use_vos:
+            self.vos = VOSClient()
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                DrawPose(),
+                PasteMatting() if use_matting else tv_transforms.Lambda(lambda x: x),
+                ResizePad(img_size, padding=isinstance(img_size, int)),
+                RandomHorizontalFlip(),
+            ]
+        )
+        self.img_normalize = Normalize([0.5], [0.5], inplace=True)
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file):
+        print("Loading dataset...")
+        if self.use_vos:
+            dataset_file = [d.strip() for d in dataset_file.split(',')]
+            out = {}
+            for file_path in dataset_file:
+                temp = load_file(file_path)
+                out.update(temp)
+        else:
+            out = load_file(dataset_file)
+
+        return out
+
+    def to_tensor(self, img, dtype=torch.float32):
+        def _to_tensor(img):
+            img = np.array(img).transpose((2, 0, 1))
+            img = torch.from_numpy(img).contiguous()
+            return img.to(dtype).div(255.0)
+
+        if isinstance(img, Sequence):
+            img = [_to_tensor(p) for p in img]
+            img = torch.stack(img)
+        else:
+            img = _to_tensor(img)
+
+        return img
+
+    def get_frames_name_list(self, video_dict):
+        video_list = []
+        for vname, vlist in video_dict.items():
+            samples_idx = list(range(0, len(vlist), self.stride))
+            vlist = [vlist[i] for i in samples_idx]
+
+            if len(vlist) < self.num_frames:
+                vlist = vlist + [vlist[-1],] * (self.num_frames - len(vlist))
+                video_list.append(vlist)
+            else:
+                num_samples = int(
+                    np.ceil((len(vlist) - self.num_frames) / self.sample_stride + 1))
+
+                start_idx = 0
+                for i in range(num_samples):
+                    if start_idx + self.num_frames > len(vlist):
+                        video_list.append(
+                            [vlist[j] for j in range(len(vlist) - self.num_frames, len(vlist))])
+                    else:
+                        video_list.append(
+                            [vlist[j] for j in range(start_idx, start_idx + self.num_frames)])
+                    start_idx += self.sample_stride
+
+        return video_list
+
+    def load_img_points_matting(self, item):
+        img = join(
+            self.train_data_dir, item["image"]) if self.train_data_dir is not None else item["image"]
+        points = join(
+            self.condition_data_dir, item["pose"]) if self.condition_data_dir is not None else item["pose"]
+        matting = None
+        if self.use_matting:
+            matting = join(
+                self.matting_data_dir, item["matting"]) if self.matting_data_dir is not None else item["matting"]
+
+        if self.use_vos:
+            img = self.vos.download_vos_pil(img)
+            points = self.vos.download_vos_pkl(points)
+            if self.use_matting:
+                matting = self.vos.download_vos_pil(matting)
+        else:
+            points = pkl_load(points)
+
+        img = load_image(img)
+        if self.use_matting:
+            matting = load_image(matting)
+
+        return img, points, matting
+
+    def load_ref_img_matting(self, item):
+        ref_img = join(self.train_data_dir, item["image"]) if self.train_data_dir is not None else item["image"]
+        ref_matting = None
+        if self.use_matting:
+            ref_matting = join(
+                self.matting_data_dir, item["matting"]) if self.matting_data_dir is not None else item["matting"]
+
+        if self.use_vos:
+            ref_img = self.vos.download_vos_pil(ref_img)
+            if self.use_matting:
+                ref_matting = self.vos.download_vos_pil(ref_matting)
+
+        ref_img = load_image(ref_img)
+        if self.use_matting:
+            ref_matting = load_image(ref_matting)
+
+        return ref_img, ref_matting
+
+    def get_frames(self, video_list, random_sample=False):
+        images, condition_points = [], []
+        mattings = []
+        if random_sample:
+            st_idx = random.randint(0, self.stride - 1)
+            samples_idx = list(range(st_idx, len(video_list), self.stride))
+            if len(samples_idx) >= self.num_frames:
+                st_idx = random.randint(0, len(samples_idx) - self.num_frames)
+                samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
+            else:
+                samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
+
+            for i in samples_idx:
+                item = video_list[i]
+                img, points, matting = self.load_img_points_matting(item)
+                images.append(img)
+                condition_points.append(points)
+                mattings.append(matting)
+            ref_item = video_list[random.choice(samples_idx)]
+        else:
+            for item in video_list:
+                img, points, matting = self.load_img_points_matting(item)
+                images.append(img)
+                condition_points.append(points)
+                mattings.append(matting)
+            ref_item = random.choice(video_list)
+
+        reference_image, ref_matting = self.load_ref_img_matting(ref_item)
+
+        return images, condition_points, reference_image, mattings, ref_matting
+
+    def get_data(self, index):
+        if self.is_video:
+            # train with video
+            vlist = copy.deepcopy(self.video_list[index])
+            images, condition_points, reference_image, mattings, ref_matting = self.get_frames(vlist)
+            data = {
+                'image': images,
+                'condition': condition_points,
+                'reference_image': reference_image,
+                'matting': mattings,
+                'reference_matting': ref_matting,
+            }
+        else:
+            # train with image
+            video_name, item = self.item_list[index]
+            img, points, matting = self.load_img_points_matting(item)
+            # random select reference image
+            video_list = copy.deepcopy(self.metadata[video_name])
+            if len(video_list) > 2 * self.clip_length:
+                idx = video_list.index(item)
+                st_idx = idx - self.clip_length if idx - self.clip_length >= 0 else 0
+                end_idx = idx + self.clip_length if idx + self.clip_length < len(video_list) else len(video_list)
+
+                st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
+                end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
+                video_list = video_list[st_idx: end_idx]
+
+            if len(video_list) > 1:
+                video_list.remove(item)
+            ref_item = random.choice(video_list)
+            ref_img, ref_matting = self.load_ref_img_matting(ref_item)
+            data = {
+                'image': img,
+                'condition': points,
+                'reference_image': ref_img,
+                'matting': matting,
+                'reference_matting': ref_matting,
+            }
+        data = self.image_transforms(data)
+        data['image'] = self.to_tensor(data['image'])
+        data['condition_image'] = self.to_tensor(data['condition_image'])
+
+        return data
+
+    def __getitem__(self, index):
+        example = {}
+        data = self.get_data(index)
+
+        example["pixel_values"] = self.img_normalize(data['image'])
+        example["conditioning_pixel_values"] = data['condition_image']
+
+        if random.random() < self.drop_text:
+            data['reference_image'] = Image.new("RGB", data['reference_image'].size)
+
+        example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
+        if self.clip_processor is not None:
+            example["reference_image"] = self.clip_processor(
+                images=data["reference_image"], return_tensors="pt").pixel_values
+
+        return example
+
+
 class ImageVariationDataset(torch.utils.data.Dataset):
     def __init__(
             self,
@@ -794,6 +1043,8 @@ class ImageVariationDataset(torch.utils.data.Dataset):
         for file, tdir, idir in zip(dataset_file, train_data_dir, image_embedding_dir):
             temp_list = load_file(file)
             for name in tqdm(temp_list):
+                if file.endswith(".csv"):
+                    name = name[0]
                 out.append([join(tdir, name), join(idir, splitext(name)[0] + '.npy')])
 
         return out
