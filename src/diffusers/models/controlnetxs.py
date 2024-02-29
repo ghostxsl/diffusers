@@ -681,6 +681,9 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         temb = temb + aug_emb if aug_emb is not None else temb
 
         # text embeddings
+        encoder_hidden_states = self.process_encoder_hidden_states(
+            base_model, encoder_hidden_states, added_cond_kwargs
+        )
         cemb = encoder_hidden_states
 
         # Preparation
@@ -767,6 +770,39 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         vae_downscale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
         compatible = condition_downscale_factor == vae_downscale_factor
         return compatible, condition_downscale_factor, vae_downscale_factor
+
+    @staticmethod
+    def process_encoder_hidden_states(
+        base_model, encoder_hidden_states: torch.Tensor, added_cond_kwargs: Dict[str, Any]
+    ) -> torch.Tensor:
+        if base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type == "text_proj":
+            encoder_hidden_states = base_model.encoder_hid_proj(encoder_hidden_states)
+        elif base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type == "text_image_proj":
+            # Kadinsky 2.1 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{base_model.__class__} has the config param `encoder_hid_dim_type` set to 'text_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            encoder_hidden_states = base_model.encoder_hid_proj(encoder_hidden_states, image_embeds)
+        elif base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type == "image_proj":
+            # Kandinsky 2.2 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{base_model.__class__} has the config param `encoder_hid_dim_type` set to 'image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            encoder_hidden_states = base_model.encoder_hid_proj(image_embeds)
+        elif base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type == "ip_image_proj":
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{base_model.__class__} has the config param `encoder_hid_dim_type` set to 'ip_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            image_embeds = base_model.encoder_hid_proj(image_embeds)
+            encoder_hidden_states = (encoder_hidden_states, image_embeds)
+        return encoder_hidden_states
 
 
 class SubBlock(nn.ModuleList):
