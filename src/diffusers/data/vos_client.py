@@ -34,9 +34,9 @@ class VOSClient:
             use_ssl=False)
 
     @staticmethod
-    def get_pil_bytes(img, format='png'):
+    def get_pil_bytes(img, format='png', quality=95):
         buf = BytesIO()
-        img.save(buf, format=format)
+        img.save(buf, format=format, quality=quality)
         img_bytes = buf.getvalue()
         return img_bytes
 

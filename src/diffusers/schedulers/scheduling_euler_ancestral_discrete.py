@@ -488,7 +488,18 @@ class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         sigma = self.sigmas[self.step_index]
 
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
-        return sample - sigma * model_output
+        if self.config.prediction_type == "epsilon":
+            pred_original_sample = sample - sigma * model_output
+        elif self.config.prediction_type == "v_prediction":
+            # v * c_out + input * c_skip
+            pred_original_sample = model_output * (-sigma / (sigma**2 + 1) ** 0.5) + (sample / (sigma**2 + 1))
+        elif self.config.prediction_type == "sample":
+            raise NotImplementedError("prediction_type not implemented yet: sample")
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, or `v_prediction`"
+            )
+        return pred_original_sample
 
     def webui_step(self,
                    pred_original_sample: torch.FloatTensor,
