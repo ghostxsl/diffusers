@@ -60,6 +60,11 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
+        "--unet_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
         "--controlnet_model_path",
         type=str,
         default=None,
@@ -392,6 +397,14 @@ def main(args):
     # import correct image encoder class
     feature_extractor = CLIPImageProcessor()
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.pretrained_model_path, subfolder="image_encoder")
+    vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
+
+    image_encoder.requires_grad_(False)
+    vae.requires_grad_(False)
+
+    # Move vae, unet and text_encoder to device and cast to weight_dtype
+    image_encoder.to(accelerator.device, dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=weight_dtype)
 
     # Load scheduler and models
     # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
@@ -405,8 +418,11 @@ def main(args):
         timestep_spacing="trailing",
         rescale_betas_zero_snr=True,
     )
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
-    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
+    if args.unet_model_path:
+        logger.info("Loading existing unet weights")
+        unet = UNet2DConditionModel.from_pretrained(args.unet_model_path)
+    else:
+        unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
     # Load ControlNet
     if args.controlnet_model_path:
@@ -424,16 +440,10 @@ def main(args):
         logger.info("Initializing referencenet weights from unet")
         referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
-    image_encoder.requires_grad_(False)
-    vae.requires_grad_(False)
     # unet.requires_grad_(False)
     # train_unet_cross_attn(unet)
     # cast_training_params(unet)
     # unet.to(accelerator.device, dtype=weight_dtype)
-
-    # Move vae, unet and text_encoder to device and cast to weight_dtype
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
-    vae.to(accelerator.device, dtype=weight_dtype)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -528,8 +538,8 @@ def main(args):
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps,
-        num_training_steps=args.max_train_steps,
+        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=args.max_train_steps * accelerator.num_processes,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )

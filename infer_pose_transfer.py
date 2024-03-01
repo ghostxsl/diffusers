@@ -65,7 +65,7 @@ def parse_args():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default="/xsl/wilson.xu/pt_7k_0229",
+        default="/xsl/wilson.xu/checkpoint-90000",
     )
     parser.add_argument(
         "--vae_model_path",
@@ -250,7 +250,6 @@ def main(args):
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
-        os.makedirs(join(args.out_dir, split(file)[1]), exist_ok=True)
         for j, pose in enumerate(pose_list):
             out = pipe(
                 reference_image=ref_img,
@@ -266,7 +265,7 @@ def main(args):
                 [ref_img.resize(args.resolution[::-1], 1),
                  pose.resize(args.resolution[::-1], 1),
                  out], axis=1)
-            Image.fromarray(out_img).save(join(args.out_dir, split(file)[1], f"{j}.jpg"))
+            Image.fromarray(out_img).save(join(args.out_dir, splitext(split(file)[1])[0] + f"_{j}.jpg"))
 
 if __name__ == '__main__':
     args = parse_args()
