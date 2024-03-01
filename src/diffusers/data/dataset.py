@@ -952,17 +952,6 @@ class PoseTransDataset(torch.utils.data.Dataset):
             img, points, matting = self.load_img_points_matting(item)
             # random select reference image
             video_list = copy.deepcopy(self.metadata[video_name])
-            if len(video_list) > 2 * self.clip_length:
-                idx = video_list.index(item)
-                st_idx = idx - self.clip_length if idx - self.clip_length >= 0 else 0
-                end_idx = idx + self.clip_length if idx + self.clip_length < len(video_list) else len(video_list)
-
-                st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
-                end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
-                video_list = video_list[st_idx: end_idx]
-
-            if len(video_list) > 1:
-                video_list.remove(item)
             ref_item = random.choice(video_list)
             ref_img, ref_matting = self.load_ref_img_matting(ref_item)
             data = {

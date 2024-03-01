@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--train_cross_attn",
         action="store_true",
-        help=(" "),
+        help="Whether to train cross_attn",
     )
     parser.add_argument(
         "--output_dir",
@@ -119,16 +119,16 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=1024,
+        default=768,
         help=(
             "The resolution for input images, all the images in the train"
             " dataset will be resized to this resolution"
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=300)
+    parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
         "--max_train_steps",
         type=int,
