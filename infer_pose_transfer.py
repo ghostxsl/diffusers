@@ -8,7 +8,7 @@ import torch
 
 from diffusers import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipelines.vip.vip_pose_transfer import VIPPoseTransferPipeline
-from diffusers.schedulers import EulerAncestralDiscreteScheduler
+from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
@@ -17,6 +17,7 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from aistudio.utils.loader import ROOT_DIR
 from aistudio.extensions.HumanPose import HumanPose
 from aistudio.extensions.HumanPose.utils import POSE_CONFIG_DIR
+from aistudio.extensions.P3MNet import P3MNet
 
 
 def parse_args():
@@ -49,7 +50,12 @@ def parse_args():
         help="Directory to save.")
     parser.add_argument(
         "--crop",
-        default=False,
+        default=True,
+        type=bool,
+        help="")
+    parser.add_argument(
+        "--matting",
+        default=True,
         type=bool,
         help="")
 
@@ -65,17 +71,17 @@ def parse_args():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default="/xsl/wilson.xu/checkpoint-90000",
+        default="/apps/dat/cv/xsl/exp_animate/checkpoint-130000",
     )
     parser.add_argument(
         "--vae_model_path",
         type=str,
-        default="/xsl/wilson.xu/weights/vae_ft_mse",
+        default="/apps/dat/cv/xsl/weights/sd-image-variations/vae",
     )
     parser.add_argument(
         "--image_encoder_model_path",
         type=str,
-        default="/xsl/wilson.xu/weights/sd-image-variations/image_encoder",
+        default="/apps/dat/cv/xsl/weights/sd-image-variations/image_encoder",
     )
     parser.add_argument(
         "--weight_dir",
@@ -236,9 +242,16 @@ def main(args):
         wholebodypose_pth=join(weight_dir, "extensions/dw-ll_ucoco_384.pth"),
         device=device
     )
+    matting_infer = P3MNet(
+        model_path=join(weight_dir, "extensions/p3mnet_epoch50.pth"),
+        infer_size=640,
+    )
+
     pose_list = []
     for file in pose_img_list:
         img = load_image(file)
+        if args.crop:
+            img = crop_image(pose_infer, img)
         res, _ = pose_infer(img)
         pose_list.append(Image.fromarray(res))
 
@@ -246,6 +259,14 @@ def main(args):
         ref_img = load_image(file)
         if args.crop:
             ref_img = crop_image(pose_infer, ref_img)
+        if args.matting:
+            label_matting = matting_infer(ref_img)
+            label_matting = label_matting[..., None].astype('float32') / 255.0
+            ref_img = np.array(ref_img).astype('float32')
+            bg = np.ones_like(ref_img) * 255.0
+            ref_img = ref_img * label_matting + bg * (1 - label_matting)
+            ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
+
         print(f"{i + 1}: {file}")
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
