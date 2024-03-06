@@ -1,3 +1,4 @@
+# Copyright (c) wilson.xu. All rights reserved.
 from lavis.models import load_model_and_preprocess
 from PIL import Image
 import torch
