@@ -34,7 +34,8 @@ class VOSClient:
             use_ssl=False)
 
     @staticmethod
-    def get_pil_bytes(img, format='png', quality=95):
+    def get_pil_bytes(img, format='PNG', quality=90):
+        # format: JPEG, PNG, GIF
         buf = BytesIO()
         img.save(buf, format=format, quality=quality)
         img_bytes = buf.getvalue()
@@ -46,8 +47,8 @@ class VOSClient:
             )
         return f"s3://{self.bucket}/{s3_path}"
 
-    def upload_vos_pil(self, img, s3_path, format='png'):
-        img_bytes = self.get_pil_bytes(img, format)
+    def upload_vos_pil(self, img, s3_path, format='PNG', quality=90):
+        img_bytes = self.get_pil_bytes(img, format, quality=quality)
         return self.upload_vos_bytes(img_bytes, s3_path)
 
     def upload_vos_pkl(self, obj, s3_path):
@@ -66,3 +67,11 @@ class VOSClient:
     def download_vos_pkl(self, s3_path):
         content = self.download_vos_bytes(s3_path)
         return pickle.loads(content)
+
+    def delete_vos_file(self, s3_path):
+        s3_response_object = self.s3_client.delete_object(Bucket=self.bucket, Key=s3_path)
+        return s3_response_object['DeleteMarker']
+
+    def list_vos_files(self, s3_path):
+        s3_response_object = self.s3_client.list_objects_v2(Bucket=self.bucket, Key=s3_path)
+        return s3_response_object['Contents']

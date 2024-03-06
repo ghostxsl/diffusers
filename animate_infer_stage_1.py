@@ -16,6 +16,7 @@ from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
 from diffusers.data.utils import *
 from diffusers.data import DrawPose
+from diffusers.data.vos_client import VOSClient
 
 
 def parse_args():
@@ -42,7 +43,12 @@ def parse_args():
         help="Directory to save.")
 
     parser.add_argument(
-        "--crop",
+        "--matting",
+        default=True,
+        type=bool,
+        help="")
+    parser.add_argument(
+        "--use_vos",
         default=False,
         type=bool,
         help="")
@@ -59,17 +65,17 @@ def parse_args():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default="/xsl/wilson.xu/pt_7k_0229",
+        default="/apps/dat/cv/xsl/exp_animate/checkpoint-130000",
     )
     parser.add_argument(
         "--vae_model_path",
         type=str,
-        default="/xsl/wilson.xu/weights/vae_ft_mse",
+        default="/apps/dat/cv/xsl/weights/sd-image-variations/vae",
     )
     parser.add_argument(
         "--image_encoder_model_path",
         type=str,
-        default="/xsl/wilson.xu/weights/sd-image-variations/image_encoder",
+        default="/apps/dat/cv/xsl/weights/sd-image-variations/image_encoder",
     )
     parser.add_argument(
         "--weight_dir",
@@ -108,22 +114,42 @@ def parse_args():
 
 
 _draw = DrawPose(prob_hand=1.0, prob_face=0.0)
-def get_reference_pose_frame(video_list, img_dir, pose_dir):
+def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
     item = random.choice(video_list)
 
-    img = load_image(join(img_dir, item['image']))
-    pose = pkl_load(join(pose_dir, item['pose']))
-    pose = _draw.draw_pose(img, pose)
+    if not args.use_vos:
+        gt_img = load_image(join(img_dir, item['image']))
+        pose = pkl_load(join(pose_dir, item['pose']))
+        pose = _draw.draw_pose(gt_img, pose)
 
-    video_list.remove(item)
-    ref_item = random.choice(video_list)
-    reference_image = load_image(join(img_dir, ref_item['image']))
+        video_list.remove(item)
+        ref_item = random.choice(video_list)
+        ref_img = load_image(join(img_dir, ref_item['image']))
+    else:
+        gt_img = load_image(args.vos.download_vos_pil(item['image']))
+        pose = args.vos.download_vos_pkl(item['pose'])
+        pose = _draw.draw_pose(gt_img, pose)
 
-    return reference_image, pose, img
+        video_list.remove(item)
+        ref_item = random.choice(video_list)
+        ref_img = args.vos.download_vos_pil(ref_item['image'])
+        if args.matting:
+            label_matting = np.array(args.vos.download_vos_pil(ref_item['matting']))
+            label_matting = label_matting[..., None].astype('float32') / 255.0
+            ref_img = np.array(ref_img).astype('float32')
+            bg = np.ones_like(ref_img) * 255.0
+            ref_img = ref_img * label_matting + bg * (1 - label_matting)
+            ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
+
+
+    return ref_img, pose, gt_img
 
 
 if __name__ == '__main__':
     args = parse_args()
+    if args.use_vos:
+        args.vos = VOSClient()
+
     metadata = load_file(args.dataset_file)
 
     device = args.device
@@ -149,7 +175,7 @@ if __name__ == '__main__':
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
-        ref_img, pose, gt_img = get_reference_pose_frame(v, args.img_dir, args.pose_dir)
+        ref_img, pose, gt_img = get_reference_pose_frame(args, v, args.img_dir, args.pose_dir)
         out = pipe(
             reference_image=ref_img,
             control_image=pose,

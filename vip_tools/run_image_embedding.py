@@ -1,3 +1,4 @@
+# Copyright (c) wilson.xu. All rights reserved.
 import os
 import sys
 from os.path import join, split, splitext

@@ -798,7 +798,7 @@ class PoseTransDataset(torch.utils.data.Dataset):
 
         self.image_transforms = tv_transforms.Compose(
             [
-                DrawPose(),
+                DrawPose(prob_face=0.0),
                 PasteMatting() if use_matting else tv_transforms.Lambda(lambda x: x),
                 ResizePad(img_size, padding=isinstance(img_size, int)),
                 RandomHorizontalFlip(),
