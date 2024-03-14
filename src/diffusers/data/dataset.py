@@ -28,7 +28,6 @@ from torchvision import transforms as tv_transforms
 from .transforms import *
 from .utils import *
 from diffusers.utils.vip_utils import load_image
-from .videoreader import VideoReader
 from .vos_client import VOSClient
 
 
@@ -754,44 +753,31 @@ class PoseTransDataset(torch.utils.data.Dataset):
             train_data_dir,
             condition_data_dir,
             clip_processor,
+            img_size=512,
+            prob_uncond=0.1,
             matting_data_dir=None,
             use_matting=False,
-            img_size=512,
-            drop_text=0.1,
-            num_frames=24,
-            stride=4,
-            overlap_frame=8,
-            is_video=False,
-            caption="",
             use_vos=False,
+            clip_length=25,
     ):
-        if drop_text < 0. or drop_text > 1.:
-            raise ValueError("`drop_text` must be in the range [0., 1.].")
+        if prob_uncond < 0. or prob_uncond > 1.:
+            raise ValueError("`prob_uncond` must be in the range [0., 1.].")
 
         self.train_data_dir = train_data_dir
         self.condition_data_dir = condition_data_dir
+        self.clip_processor = clip_processor
+        self.prob_uncond = prob_uncond
         self.matting_data_dir = matting_data_dir
         self.use_matting = use_matting
-        self.clip_processor = clip_processor
-        self.drop_text = drop_text
-        self.num_frames = num_frames
-        self.stride = stride
-        self.sample_stride = num_frames - overlap_frame
-        self.is_video = is_video
-        self.caption = caption
         self.use_vos = use_vos
-        self.clip_length = (self.num_frames - 1) * self.stride + 1
+        self.clip_length = clip_length
 
         self.metadata = self.get_metadata(dataset_file)
 
-        if is_video:
-            self.video_list = self.get_frames_name_list(self.metadata)
-            self._length = len(self.video_list)
-        else:
-            self.item_list = []
-            for k, items in tqdm(self.metadata.items()):
-                self.item_list.extend([(k, item) for item in items])
-            self._length = len(self.item_list)
+        self.item_list = []
+        for k, items in tqdm(self.metadata.items()):
+            self.item_list.extend([(k, item) for item in items])
+        self._length = len(self.item_list)
 
         if use_vos:
             self.vos = VOSClient()
@@ -800,6 +786,7 @@ class PoseTransDataset(torch.utils.data.Dataset):
             [
                 DrawPose(prob_face=0.0),
                 PasteMatting() if use_matting else tv_transforms.Lambda(lambda x: x),
+                BoxCrop(img_size) if not isinstance(img_size, int) else tv_transforms.Lambda(lambda x: x),
                 ResizePad(img_size, padding=isinstance(img_size, int)),
                 RandomHorizontalFlip(),
             ]
@@ -835,31 +822,6 @@ class PoseTransDataset(torch.utils.data.Dataset):
             img = _to_tensor(img)
 
         return img
-
-    def get_frames_name_list(self, video_dict):
-        video_list = []
-        for vname, vlist in video_dict.items():
-            samples_idx = list(range(0, len(vlist), self.stride))
-            vlist = [vlist[i] for i in samples_idx]
-
-            if len(vlist) < self.num_frames:
-                vlist = vlist + [vlist[-1],] * (self.num_frames - len(vlist))
-                video_list.append(vlist)
-            else:
-                num_samples = int(
-                    np.ceil((len(vlist) - self.num_frames) / self.sample_stride + 1))
-
-                start_idx = 0
-                for i in range(num_samples):
-                    if start_idx + self.num_frames > len(vlist):
-                        video_list.append(
-                            [vlist[j] for j in range(len(vlist) - self.num_frames, len(vlist))])
-                    else:
-                        video_list.append(
-                            [vlist[j] for j in range(start_idx, start_idx + self.num_frames)])
-                    start_idx += self.sample_stride
-
-        return video_list
 
     def load_img_points_matting(self, item):
         img = join(
@@ -903,64 +865,33 @@ class PoseTransDataset(torch.utils.data.Dataset):
 
         return ref_img, ref_matting
 
-    def get_frames(self, video_list, random_sample=False):
-        images, condition_points = [], []
-        mattings = []
-        if random_sample:
-            st_idx = random.randint(0, self.stride - 1)
-            samples_idx = list(range(st_idx, len(video_list), self.stride))
-            if len(samples_idx) >= self.num_frames:
-                st_idx = random.randint(0, len(samples_idx) - self.num_frames)
-                samples_idx = samples_idx[st_idx: st_idx + self.num_frames]
-            else:
-                samples_idx = samples_idx + [samples_idx[-1], ] * (self.num_frames - len(samples_idx))
-
-            for i in samples_idx:
-                item = video_list[i]
-                img, points, matting = self.load_img_points_matting(item)
-                images.append(img)
-                condition_points.append(points)
-                mattings.append(matting)
-            ref_item = video_list[random.choice(samples_idx)]
-        else:
-            for item in video_list:
-                img, points, matting = self.load_img_points_matting(item)
-                images.append(img)
-                condition_points.append(points)
-                mattings.append(matting)
-            ref_item = random.choice(video_list)
-
-        reference_image, ref_matting = self.load_ref_img_matting(ref_item)
-
-        return images, condition_points, reference_image, mattings, ref_matting
-
     def get_data(self, index):
-        if self.is_video:
-            # train with video
-            vlist = copy.deepcopy(self.video_list[index])
-            images, condition_points, reference_image, mattings, ref_matting = self.get_frames(vlist)
-            data = {
-                'image': images,
-                'condition': condition_points,
-                'reference_image': reference_image,
-                'matting': mattings,
-                'reference_matting': ref_matting,
-            }
-        else:
-            # train with image
-            video_name, item = self.item_list[index]
-            img, points, matting = self.load_img_points_matting(item)
-            # random select reference image
-            video_list = copy.deepcopy(self.metadata[video_name])
-            ref_item = random.choice(video_list)
-            ref_img, ref_matting = self.load_ref_img_matting(ref_item)
-            data = {
-                'image': img,
-                'condition': points,
-                'reference_image': ref_img,
-                'matting': matting,
-                'reference_matting': ref_matting,
-            }
+        # train with image
+        video_name, item = self.item_list[index]
+        img, points, matting = self.load_img_points_matting(item)
+        # random select reference image
+        video_list = copy.deepcopy(self.metadata[video_name])
+        if len(video_list) > 2 * self.clip_length:
+            idx = video_list.index(item)
+            st_idx = idx - self.clip_length if idx - self.clip_length >= 0 else 0
+            end_idx = idx + self.clip_length if idx + self.clip_length < len(video_list) else len(video_list)
+
+            st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
+            end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
+            video_list = video_list[st_idx: end_idx]
+            video_list.remove(item)
+
+        ref_item = random.choice(video_list)
+        ref_img, ref_points, ref_matting = self.load_img_points_matting(ref_item)
+        # ref_img, ref_matting = self.load_ref_img_matting(ref_item)
+        data = {
+            'image': img,
+            'condition': points,
+            'matting': matting,
+            'reference_image': ref_img,
+            'reference_condition': ref_points,
+            'reference_matting': ref_matting,
+        }
         data = self.image_transforms(data)
         data['image'] = self.to_tensor(data['image'])
         data['condition_image'] = self.to_tensor(data['condition_image'])
@@ -974,13 +905,12 @@ class PoseTransDataset(torch.utils.data.Dataset):
         example["pixel_values"] = self.img_normalize(data['image'])
         example["conditioning_pixel_values"] = data['condition_image']
 
-        if random.random() < self.drop_text:
+        if random.random() < self.prob_uncond:
             data['reference_image'] = Image.new("RGB", data['reference_image'].size)
 
         example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
-        if self.clip_processor is not None:
-            example["reference_image"] = self.clip_processor(
-                images=data["reference_image"], return_tensors="pt").pixel_values
+        example["reference_image"] = self.clip_processor(
+            images=data["reference_image"], return_tensors="pt").pixel_values
 
         return example
 

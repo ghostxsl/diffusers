@@ -9,7 +9,7 @@ from PIL import Image
 import torch
 import torchvision.transforms.functional as F
 from torchvision.utils import _log_api_usage_once
-from .utils import draw_bodypose, draw_handpose, draw_facepose
+from .utils import draw_bodypose, draw_handpose, draw_facepose, crop_human_bbox
 
 
 __all__ = [
@@ -17,7 +17,7 @@ __all__ = [
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
     'ColorJitter', 'DrawCanny', 'ResizePad',
-    'PasteMatting',
+    'PasteMatting', 'BoxCrop',
 ]
 
 
@@ -893,3 +893,109 @@ class PasteMatting(object):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(bg_value: {self.bg_value})"
+
+
+class BoxCrop(object):
+    def __init__(self,
+                 crop_size=(1024, 768),
+                 pad_val=255,
+                 pad_bbox=5):
+        _log_api_usage_once(self)
+        if isinstance(crop_size, int):
+            crop_size = [crop_size, ] * 2
+        elif isinstance(crop_size, Sequence):
+            assert len(crop_size) == 2
+        else:
+            raise Exception(f"Error crop_size type: {type(crop_size)}")
+
+        self.crop_size = crop_size
+        self.pad_val = pad_val
+        self.pad_bbox = pad_bbox
+
+    def center_crop(self, img, cond_img=None):
+        _, h, w = F.get_dimensions(img)
+        ch, cw = self.crop_size
+        img = np.array(img)
+        if cond_img is not None:
+            cond_img = np.array(cond_img)
+
+        if ch <= h and cw <= w:
+            y1 = (h - ch) // 2
+            x1 = (w - cw) // 2
+            img = img[y1: y1 + ch, x1: x1 + cw]
+            if cond_img is not None:
+                cond_img = cond_img[y1: y1 + ch, x1: x1 + cw]
+        else:
+            ratio_h, ratio_w = ch / h, cw / w
+            # 短边resize
+            if ratio_h < ratio_w:
+                oh = int(w / cw * ch)
+                y1 = (h - oh) // 2
+                img = img[y1: y1 + oh]
+                if cond_img is not None:
+                    cond_img = cond_img[y1: y1 + oh]
+            else:
+                ow = int(h / ch * cw)
+                x1 = (w - ow) // 2
+                img = img[:, x1: x1 + ow]
+                if cond_img is not None:
+                    cond_img = cond_img[:, x1: x1 + ow]
+
+        if cond_img is not None:
+            cond_img = Image.fromarray(cond_img).resize((cw, ch), 1)
+
+        return Image.fromarray(img).resize((cw, ch), 1), cond_img
+
+    def crop_and_resize(self, src_img, bboxes, cond_img=None):
+        _, height, width = F.get_dimensions(src_img)
+        bboxes *= np.array([width, height, width, height])
+
+        if len(bboxes) == 0:
+            return self.center_crop(src_img, cond_img)
+        elif len(bboxes) == 1:
+            det_bbox = np.int32(bboxes[0])
+        else:
+            area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+            ind = np.argmax(area)
+            det_bbox = np.int32(bboxes[ind])
+
+        crop_bbox, pad_ = crop_human_bbox(
+            det_bbox, (height, width), self.crop_size, self.pad_bbox)
+        x1, y1, x2, y2 = crop_bbox
+        src_img = np.array(src_img)
+        crop_img = src_img[y1: y2, x1: x2]
+        if cond_img is not None:
+            cond_img = np.array(cond_img)
+            cond_img = cond_img[y1: y2, x1: x2]
+        if pad_ is not None:
+            crop_img = np.pad(crop_img, pad_, constant_values=self.pad_val)
+            if cond_img is not None:
+                cond_img = np.pad(cond_img, pad_, constant_values=0)
+
+        crop_img = Image.fromarray(crop_img).resize(self.crop_size[::-1], Image.LANCZOS)
+        if cond_img is not None:
+            cond_img = Image.fromarray(cond_img).resize(self.crop_size[::-1], Image.LANCZOS)
+        return crop_img, cond_img
+
+    def __call__(self, data):
+        assert isinstance(data, dict)
+
+        if 'image' in data and 'condition' in data:
+            img, cond_img = self.crop_and_resize(
+                data['image'],
+                data['condition']['body']['bboxes'],
+                cond_img=data['condition_image'] if 'condition_image' in data else None,
+            )
+            data['image'] = img
+            if 'condition_image' in data:
+                data['condition_image'] = cond_img
+
+        if 'reference_image' in data and 'reference_condition' in data:
+            img, _ = self.crop_and_resize(
+                data['reference_image'], data['reference_condition']['body']['bboxes'])
+        data['reference_image'] = img
+
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(crop_size: {self.crop_size}, pad_val: {self.pad_val})"

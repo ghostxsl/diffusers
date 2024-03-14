@@ -48,6 +48,11 @@ def parse_args():
         type=bool,
         help="")
     parser.add_argument(
+        "--use_pad",
+        default=False,
+        type=bool,
+        help="")
+    parser.add_argument(
         "--use_vos",
         default=False,
         type=bool,
@@ -113,6 +118,26 @@ def parse_args():
     return args
 
 
+def pad_image(img, pad_values=255):
+    w, h = img.size
+    img = np.array(img)
+    if w > h:
+        pad_ = w - h
+        img = np.pad(
+            img,
+            ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0)),
+            constant_values=pad_values
+        )
+    elif h > w:
+        pad_ = h - w
+        img = np.pad(
+            img,
+            ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0)),
+            constant_values=pad_values
+        )
+    return Image.fromarray(img)
+
+
 _draw = DrawPose(prob_hand=1.0, prob_face=0.0)
 def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
     item = random.choice(video_list)
@@ -122,7 +147,8 @@ def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
         pose = pkl_load(join(pose_dir, item['pose']))
         pose = _draw.draw_pose(gt_img, pose)
 
-        video_list.remove(item)
+        if len(video_list) > 1:
+            video_list.remove(item)
         ref_item = random.choice(video_list)
         ref_img = load_image(join(img_dir, ref_item['image']))
     else:
@@ -130,7 +156,8 @@ def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
         pose = args.vos.download_vos_pkl(item['pose'])
         pose = _draw.draw_pose(gt_img, pose)
 
-        video_list.remove(item)
+        if len(video_list) > 1:
+            video_list.remove(item)
         ref_item = random.choice(video_list)
         ref_img = args.vos.download_vos_pil(ref_item['image'])
         if args.matting:
@@ -141,6 +168,10 @@ def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
             ref_img = ref_img * label_matting + bg * (1 - label_matting)
             ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
 
+    if args.use_pad:
+        ref_img = pad_image(ref_img)
+        pose = pad_image(pose, 0)
+        gt_img = pad_image(gt_img)
 
     return ref_img, pose, gt_img
 

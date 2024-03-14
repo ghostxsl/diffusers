@@ -120,7 +120,6 @@ def f3_merge_duplicate_group(group_file, name2group_file, cache_file):
             else:
                 unique_dict[new_k] += v
         elif sum(temp) < max(temp) * len(temp):
-            done_list.add(k)
             new_k = get_str_md5(k)
             if new_k not in unique_dict:
                 unique_dict[new_k] = v
@@ -134,7 +133,7 @@ def f3_merge_duplicate_group(group_file, name2group_file, cache_file):
 
 
 def f4_merge_duplicate_image_name(input_file, output_file, urls_file):
-    # 4. 根据group2, 去除重复图片名
+    # 4. 根据unique_group, 去除重复图片名
     print("start f4 ...")
     group_infos = load_file(input_file)
 
@@ -223,8 +222,8 @@ def main(args):
     f3_merge_duplicate_group(group_pkl, name2group_pkl, unique_group_pkl)
 
     # 4. 根据unique_group, 去除重复图片名
-    output_group_file = join(args.out_dir, splitext(basename(input_txt_file))[0] + "_group.pkl")
-    urls_file = join(args.out_dir, splitext(basename(input_txt_file))[0] + "_urls.pkl")
+    output_group_file = join(args.out_dir, splitext(basename(input_txt_file))[0] + ".group2url")
+    urls_file = join(args.out_dir, splitext(basename(input_txt_file))[0] + ".urls")
     f4_merge_duplicate_image_name(unique_group_pkl, output_group_file, urls_file)
 
 

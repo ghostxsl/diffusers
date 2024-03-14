@@ -23,7 +23,7 @@ from torch.nn import functional as F
 from torch.nn.modules.normalization import GroupNorm
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.models.attention_processor import USE_PEFT_BACKEND, AttentionProcessor
+from diffusers.models.attention_processor import AttentionProcessor
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.lora import LoRACompatibleConv
 from diffusers.models.modeling_utils import ModelMixin
@@ -867,8 +867,6 @@ def increase_block_input_in_encoder_resnet(unet: UNet2DConditionModel, block_no,
         "bias",
         "padding_mode",
     ]
-    if not USE_PEFT_BACKEND:
-        conv1_args.append("lora_layer")
 
     for a in conv1_args:
         assert hasattr(old_conv1, a)
@@ -890,12 +888,8 @@ def increase_block_input_in_encoder_resnet(unet: UNet2DConditionModel, block_no,
     }
     # swap old with new modules
     unet.down_blocks[block_no].resnets[resnet_idx].norm1 = GroupNorm(**norm_kwargs)
-    unet.down_blocks[block_no].resnets[resnet_idx].conv1 = (
-        nn.Conv2d(**conv1_kwargs) if USE_PEFT_BACKEND else LoRACompatibleConv(**conv1_kwargs)
-    )
-    unet.down_blocks[block_no].resnets[resnet_idx].conv_shortcut = (
-        nn.Conv2d(**conv_shortcut_args_kwargs) if USE_PEFT_BACKEND else LoRACompatibleConv(**conv_shortcut_args_kwargs)
-    )
+    unet.down_blocks[block_no].resnets[resnet_idx].conv1 = nn.Conv2d(**conv1_kwargs)
+    unet.down_blocks[block_no].resnets[resnet_idx].conv_shortcut = nn.Conv2d(**conv_shortcut_args_kwargs)
     unet.down_blocks[block_no].resnets[resnet_idx].in_channels += by  # surgery done here
 
 
@@ -914,8 +908,6 @@ def increase_block_input_in_encoder_downsampler(unet: UNet2DConditionModel, bloc
         "bias",
         "padding_mode",
     ]
-    if not USE_PEFT_BACKEND:
-        args.append("lora_layer")
 
     for a in args:
         assert hasattr(old_down, a)
@@ -923,9 +915,7 @@ def increase_block_input_in_encoder_downsampler(unet: UNet2DConditionModel, bloc
     kwargs["bias"] = "bias" in kwargs  # as param, bias is a boolean, but as attr, it's a tensor.
     kwargs["in_channels"] += by  # surgery done here
     # swap old with new modules
-    unet.down_blocks[block_no].downsamplers[0].conv = (
-        nn.Conv2d(**kwargs) if USE_PEFT_BACKEND else LoRACompatibleConv(**kwargs)
-    )
+    unet.down_blocks[block_no].downsamplers[0].conv = nn.Conv2d(**kwargs)
     unet.down_blocks[block_no].downsamplers[0].channels += by  # surgery done here
 
 
@@ -950,8 +940,6 @@ def increase_block_input_in_mid_resnet(unet: UNet2DConditionModel, by):
         "bias",
         "padding_mode",
     ]
-    if not USE_PEFT_BACKEND:
-        conv1_args.append("lora_layer")
 
     conv1_kwargs = {a: getattr(old_conv1, a) for a in conv1_args}
     conv1_kwargs["bias"] = "bias" in conv1_kwargs  # as param, bias is a boolean, but as attr, it's a tensor.
@@ -970,12 +958,8 @@ def increase_block_input_in_mid_resnet(unet: UNet2DConditionModel, by):
     }
     # swap old with new modules
     unet.mid_block.resnets[0].norm1 = GroupNorm(**norm_kwargs)
-    unet.mid_block.resnets[0].conv1 = (
-        nn.Conv2d(**conv1_kwargs) if USE_PEFT_BACKEND else LoRACompatibleConv(**conv1_kwargs)
-    )
-    unet.mid_block.resnets[0].conv_shortcut = (
-        nn.Conv2d(**conv_shortcut_args_kwargs) if USE_PEFT_BACKEND else LoRACompatibleConv(**conv_shortcut_args_kwargs)
-    )
+    unet.mid_block.resnets[0].conv1 = nn.Conv2d(**conv1_kwargs)
+    unet.mid_block.resnets[0].conv_shortcut = nn.Conv2d(**conv_shortcut_args_kwargs)
     unet.mid_block.resnets[0].in_channels += by  # surgery done here
 
 

@@ -112,7 +112,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--drop_text",
+        "--prob_uncond",
         type=float,
         default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
@@ -133,19 +133,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--num_frames",
-        type=int,
-        default=24,
-    )
-    parser.add_argument(
-        "--stride",
-        type=int,
-        default=4,
-    )
-    parser.add_argument(
         "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument("--num_train_epochs", type=int, default=300)
+    parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -167,7 +157,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=5,
+        default=10,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -205,7 +195,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="constant",
+        default="constant_with_warmup",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
@@ -402,7 +392,7 @@ def main(args):
     image_encoder.requires_grad_(False)
     vae.requires_grad_(False)
 
-    # Move vae, unet and text_encoder to device and cast to weight_dtype
+    # Move vae and image_encoder to device and cast to weight_dtype
     image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
@@ -508,9 +498,7 @@ def main(args):
         condition_data_dir=args.condition_data_dir,
         clip_processor=feature_extractor,
         img_size=args.resolution,
-        drop_text=args.drop_text,
-        num_frames=args.num_frames,
-        stride=args.stride,
+        prob_uncond=args.prob_uncond,
         use_vos=args.use_vos,
         matting_data_dir=args.matting_data_dir,
         use_matting=args.use_matting,
