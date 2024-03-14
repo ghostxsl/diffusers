@@ -44,6 +44,11 @@ def parse_args():
         type=str,
         help="Directory to pose image.")
     parser.add_argument(
+        "--use_pose_infer",
+        default=True,
+        type=bool,
+        help="")
+    parser.add_argument(
         "--out_dir",
         default="output",
         type=str,
@@ -56,6 +61,11 @@ def parse_args():
     parser.add_argument(
         "--matting",
         default=True,
+        type=bool,
+        help="")
+    parser.add_argument(
+        "--use_pad",
+        default=False,
         type=bool,
         help="")
 
@@ -210,6 +220,26 @@ def crop_image(pose_infer, image, crop_size=(1024, 768)):
     return Image.fromarray(crop_img).resize(crop_size[::-1], Image.LANCZOS)
 
 
+def pad_image(img, pad_values=255):
+    w, h = img.size
+    img = np.array(img)
+    if w > h:
+        pad_ = w - h
+        img = np.pad(
+            img,
+            ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0)),
+            constant_values=pad_values
+        )
+    elif h > w:
+        pad_ = h - w
+        img = np.pad(
+            img,
+            ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0)),
+            constant_values=pad_values
+        )
+    return Image.fromarray(img)
+
+
 def main(args):
     ref_img_list = get_img_path_list(args.ref_img, args.ref_dir)
     pose_img_list = get_img_path_list(args.pose_img, args.pose_dir)
@@ -250,10 +280,14 @@ def main(args):
     pose_list = []
     for file in pose_img_list:
         img = load_image(file)
-        if args.crop:
-            img = crop_image(pose_infer, img)
-        res, _ = pose_infer(img)
-        pose_list.append(Image.fromarray(res))
+        if args.use_pose_infer:
+            if args.crop:
+                img = crop_image(pose_infer, img)
+            res, _ = pose_infer(img)
+            img = Image.fromarray(res)
+        if args.use_pad:
+            img = pad_image(img, 0)
+        pose_list.append(img)
 
     for i, file in enumerate(ref_img_list):
         ref_img = load_image(file)
@@ -267,6 +301,8 @@ def main(args):
             ref_img = ref_img * label_matting + bg * (1 - label_matting)
             ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
 
+        if args.use_pad:
+            ref_img = pad_image(ref_img)
         print(f"{i + 1}: {file}")
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
