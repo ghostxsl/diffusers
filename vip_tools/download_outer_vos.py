@@ -109,9 +109,9 @@ if __name__ == "__main__":
     args = parse_args()
 
     data_list = load_file(args.data_file)
+    print(len(data_list))
 
     downloader = ImageDownloader(num_thread=args.num_thread)
-
     downloader.download_images(data_list, args.save_dir)
 
     print('Done!')

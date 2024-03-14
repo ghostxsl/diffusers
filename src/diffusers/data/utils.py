@@ -17,7 +17,7 @@ __all__ = [
     'i2i_collate_fn',
     'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
-    'get_file_md5', 'get_str_md5',
+    'get_file_md5', 'get_str_md5', 'crop_human_bbox',
 ]
 
 
@@ -233,3 +233,54 @@ def get_file_md5(file_path, nbytes=-1):
 
 def get_str_md5(string):
     return hashlib.md5(string.encode("utf-8")).hexdigest()
+
+
+def crop_human_bbox(det_bbox, img_size, crop_size=(1024, 768), pad_bbox=5):
+    x1, y1, x2, y2 = det_bbox
+    h, w = img_size
+    ch, cw = crop_size
+
+    x1 = 0 if x1 - pad_bbox < 0 else x1 - pad_bbox
+    y1 = 0 if y1 - pad_bbox < 0 else y1 - pad_bbox
+    x2 = w if x2 + pad_bbox > w else x2 + pad_bbox
+    y2 = h if y2 + pad_bbox > h else y2 + pad_bbox
+
+    bh, bw = y2 - y1, x2 - x1
+    ratio_h, ratio_w = ch / bh, cw / bw
+
+    pad_ = [[0, 0], [0, 0], [0, 0]]
+    # 长边resize
+    if ratio_h < ratio_w:
+        # 按高 resize
+        ow = int(bh / ch * cw)
+        expand_w = ow - bw
+
+        x1 -= int(expand_w / 2)
+        if x1 < 0:
+            pad_[1][0] = abs(x1)
+            x1 = 0
+
+        x2 += (expand_w - int(expand_w / 2))
+        if x2 > w:
+            pad_[1][1] = x2 - w
+            x2 = w
+
+        return [x1, y1, x2, y2], pad_
+    elif ratio_h > ratio_w:
+        # 按宽 resize
+        oh = int(bw / cw * ch)
+        expand_h = oh - bh
+
+        y1 -= int(expand_h / 2)
+        if y1 < 0:
+            pad_[0][0] = abs(y1)
+            y1 = 0
+
+        y2 += (expand_h - int(expand_h / 2))
+        if y2 > h:
+            pad_[0][1] = y2 - h
+            y2 = h
+
+        return [x1, y1, x2, y2], pad_
+    else:
+        return det_bbox, None
