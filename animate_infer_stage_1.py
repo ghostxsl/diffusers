@@ -15,7 +15,7 @@ from diffusers.models.controlnetxs import ControlNetXSModel
 from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.utils.vip_utils import *
 from diffusers.data.utils import *
-from diffusers.data import DrawPose
+from diffusers.data import DrawPose, BoxCrop
 from diffusers.data.vos_client import VOSClient
 
 
@@ -27,6 +27,16 @@ def parse_args():
         required=True,
         help="Path to dataset file.")
     parser.add_argument(
+        "--use_vos",
+        default=False,
+        action="store_true")
+    parser.add_argument(
+        "--out_dir",
+        default="output",
+        type=str,
+        help="Directory to save.")
+
+    parser.add_argument(
         "--img_dir",
         default=None,
         type=str,
@@ -37,25 +47,15 @@ def parse_args():
         type=str,
         help="Directory to pose image.")
     parser.add_argument(
-        "--out_dir",
-        default="output",
+        "--matting_dir",
+        default=None,
         type=str,
-        help="Directory to save.")
+        help="Directory to matting image.")
 
-    parser.add_argument(
-        "--matting",
-        default=True,
-        type=bool,
-        help="")
     parser.add_argument(
         "--use_pad",
         default=False,
-        type=bool,
-        help="")
-    parser.add_argument(
-        "--use_vos",
-        default=False,
-        type=bool,
+        action="store_true",
         help="")
 
     parser.add_argument(
@@ -103,7 +103,7 @@ def parse_args():
     os.makedirs(args.out_dir, exist_ok=True)
 
     if len(args.resolution.split("x")) == 1:
-        args.resolution = int(args.resolution)
+        args.resolution = [int(args.resolution),] * 2
     elif len(args.resolution.split("x")) == 2:
         args.resolution = [int(r) for r in args.resolution.split("x")]
     else:
@@ -139,41 +139,61 @@ def pad_image(img, pad_values=255):
 
 
 _draw = DrawPose(prob_hand=1.0, prob_face=0.0)
-def get_reference_pose_frame(args, video_list, img_dir, pose_dir):
+_crop = BoxCrop(crop_size=(768, 576))
+def get_reference_pose_frame(args, video_list):
     item = random.choice(video_list)
 
     if not args.use_vos:
-        gt_img = load_image(join(img_dir, item['image']))
-        pose = pkl_load(join(pose_dir, item['pose']))
-        pose = _draw.draw_pose(gt_img, pose)
+        gt_img = load_image(join(args.img_dir, item['image']))
+        pose = pkl_load(join(args.pose_dir, item['pose']))
+        pose_img = _draw.draw_pose(gt_img.size[::-1], pose)
 
         if len(video_list) > 1:
             video_list.remove(item)
         ref_item = random.choice(video_list)
-        ref_img = load_image(join(img_dir, ref_item['image']))
+        ref_img = load_image(join(args.img_dir, ref_item['image']))
+        ref_pose = pkl_load(join(args.pose_dir, ref_item['pose']))
+        if args.matting_dir:
+            # matting
+            label_matting = np.array(load_image(join(args.matting_dir, ref_item['matting'])))
+            label_matting = label_matting[..., None].astype('float32') / 255.0
+            ref_img = np.array(ref_img).astype('float32')
+            bg = np.ones_like(ref_img) * 255.0
+            ref_img = ref_img * label_matting + bg * (1 - label_matting)
+            ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
     else:
         gt_img = load_image(args.vos.download_vos_pil(item['image']))
         pose = args.vos.download_vos_pkl(item['pose'])
-        pose = _draw.draw_pose(gt_img, pose)
+        pose_img = _draw.draw_pose(gt_img.size[::-1], pose)
 
         if len(video_list) > 1:
             video_list.remove(item)
         ref_item = random.choice(video_list)
         ref_img = args.vos.download_vos_pil(ref_item['image'])
-        if args.matting:
+        ref_pose = args.vos.download_vos_pkl(ref_item['pose'])
+        try:
+            # matting
             label_matting = np.array(args.vos.download_vos_pil(ref_item['matting']))
             label_matting = label_matting[..., None].astype('float32') / 255.0
             ref_img = np.array(ref_img).astype('float32')
             bg = np.ones_like(ref_img) * 255.0
             ref_img = ref_img * label_matting + bg * (1 - label_matting)
             ref_img = Image.fromarray(np.clip(ref_img, 0, 255).astype('uint8'))
+        except:
+            pass
 
     if args.use_pad:
         ref_img = pad_image(ref_img)
-        pose = pad_image(pose, 0)
+        pose_img = pad_image(pose_img, 0)
         gt_img = pad_image(gt_img)
 
-    return ref_img, pose, gt_img
+    gt_img, pose_img = _crop.crop_and_resize(
+        gt_img,
+        pose['body']['bboxes'],
+        cond_img=pose_img,
+    )
+    ref_img, _ = _crop.crop_and_resize(ref_img, ref_pose['body']['bboxes'])
+    return ref_img, pose_img, gt_img
 
 
 if __name__ == '__main__':
@@ -206,10 +226,10 @@ if __name__ == '__main__':
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
-        ref_img, pose, gt_img = get_reference_pose_frame(args, v, args.img_dir, args.pose_dir)
+        ref_img, pose_img, gt_img = get_reference_pose_frame(args, v)
         out = pipe(
             reference_image=ref_img,
-            control_image=pose,
+            control_image=pose_img,
             height=args.resolution[0],
             width=args.resolution[1],
             num_inference_steps=25,
@@ -219,7 +239,7 @@ if __name__ == '__main__':
         )[0]
         out_img = np.concatenate(
             [ref_img.resize(args.resolution[::-1], 1),
-             pose.resize(args.resolution[::-1], 1),
+             pose_img.resize(args.resolution[::-1], 1),
              gt_img.resize(args.resolution[::-1], 1),
              out], axis=1)
         Image.fromarray(out_img).save(join(args.out_dir, k + '.jpg'))

@@ -920,20 +920,19 @@ class ImageVariationDataset(torch.utils.data.Dataset):
             self,
             dataset_file,
             train_data_dir,
-            image_embedding_dir,
+            clip_processor,
             img_size=512,
-            drop_text=0.1,
+            prob_uncond=0.1,
             use_vos=False,
     ):
-        if drop_text < 0. or drop_text > 1.:
-            raise ValueError("`drop_text` must be in the range [0., 1.].")
+        if prob_uncond < 0. or prob_uncond > 1.:
+            raise ValueError("`prob_uncond` must be in the range [0., 1.].")
 
-        self.train_data_dir = train_data_dir
-        self.image_embedding_dir = image_embedding_dir
-        self.drop_text = drop_text
+        self.clip_processor = clip_processor
+        self.prob_uncond = prob_uncond
         self.use_vos = use_vos
 
-        self.metadata = self.get_metadata(dataset_file, train_data_dir, image_embedding_dir)
+        self.metadata = self.get_metadata(dataset_file, train_data_dir)
         self._length = len(self.metadata)
 
         if use_vos:
@@ -952,33 +951,50 @@ class ImageVariationDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
-    def get_metadata(self, dataset_file, train_data_dir, image_embedding_dir):
+    def get_metadata(self, dataset_file, train_data_dir):
         print("Loading dataset...")
         dataset_file = [a.strip() for a in dataset_file.split(',')]
-        train_data_dir = [a.strip() for a in train_data_dir.split(',')]
-        image_embedding_dir = [a.strip() for a in image_embedding_dir.split(',')]
 
-        out = []
-        for file, tdir, idir in zip(dataset_file, train_data_dir, image_embedding_dir):
-            temp_list = load_file(file)
-            for name in tqdm(temp_list):
-                if file.endswith(".csv"):
-                    name = name[0]
-                out.append([join(tdir, name), join(idir, splitext(name)[0] + '.npy')])
+        out_list = []
+        if self.use_vos:
+            for file_ in dataset_file:
+                temp_list = load_file(file_)
+                if isinstance(temp_list, list):
+                    out_list.extend(load_file(file_))
+                elif isinstance(temp_list, dict):
+                    for k, v in tqdm(temp_list.items()):
+                        out_list.extend(v)
+                else:
+                    raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
+        else:
+            train_data_dir = [a.strip() for a in train_data_dir.split(',')]
+            for file_, tdir in zip(dataset_file, train_data_dir):
+                temp_list = load_file(file_)
+                for name, caption in tqdm(temp_list):
+                    out_list.append({
+                        "image": join(tdir, name),
+                        "caption": caption,
+                    })
 
-        return out
+        return out_list
+
+    def get_data(self, item):
+        img = item["image"]
+        if self.use_vos:
+            img = self.vos.download_vos_pil(img)
+        img = load_image(img)
+        return img
 
     def __getitem__(self, index):
         example = {}
-        img_path, embed_path = self.metadata[index]
+        item = self.metadata[index]
 
-        data = load_image(img_path)
-        example["pixel_values"] = self.image_transforms(data)
-        image_embeds = torch.from_numpy(np.load(embed_path))
+        img = self.get_data(item)
+        example["pixel_values"] = self.image_transforms(img)
+        example["ref_pixel_values"] = self.clip_processor(
+            images=img, return_tensors="pt").pixel_values
 
-        if random.random() < self.drop_text:
-            example["image_embeds"] = torch.zeros_like(image_embeds)
-        else:
-            example["image_embeds"] = image_embeds
+        example["uncond"] = torch.tensor(
+            [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
 
         return example

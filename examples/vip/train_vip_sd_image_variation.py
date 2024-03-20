@@ -39,7 +39,7 @@ from diffusers import (
     DDPMScheduler,
     UNet2DConditionModel,
 )
-from diffusers.models.embeddings import ImageProjection
+from diffusers.models.embeddings import ImageProjection, IPAdapterPlusImageProjection
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr, cast_training_params
 from diffusers.utils.import_utils import is_xformers_available
@@ -63,6 +63,16 @@ def parse_args():
         type=str,
         default=None,
         required=True,
+    )
+    parser.add_argument(
+        "--image_encoder_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--vae_model_path",
+        type=str,
+        default=None,
     )
     parser.add_argument(
         "--train_cross_attn",
@@ -97,15 +107,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--image_embedding_dir",
-        type=str,
-        default=None,
-        help=(
-            "A folder containing the training image embedding."
-        ),
-    )
-    parser.add_argument(
-        "--drop_text",
+        "--prob_uncond",
         type=float,
         default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
@@ -150,7 +152,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=5,
+        default=10,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -188,7 +190,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="cosine",
+        default="constant_with_warmup",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
@@ -348,6 +350,26 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
+    # import correct image encoder class
+    feature_extractor = CLIPImageProcessor()
+    if args.image_encoder_model_path:
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_model_path)
+    else:
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+            args.pretrained_model_path, subfolder="image_encoder")
+
+    if args.vae_model_path:
+        vae = AutoencoderKL.from_pretrained(args.vae_model_path)
+    else:
+        vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
+
+    image_encoder.requires_grad_(False)
+    vae.requires_grad_(False)
+
+    # Move vae and image_encoder to device and cast to weight_dtype
+    image_encoder.to(accelerator.device, dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=weight_dtype)
+
     # Load scheduler and models
     # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     noise_scheduler = DDPMScheduler(
@@ -360,22 +382,26 @@ def main(args):
         timestep_spacing="trailing",
         rescale_betas_zero_snr=True,
     )
-    vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_path,
         subfolder="unet",
     )
     if args.train_cross_attn:
-        unet.config.encoder_hid_dim_type = "image_proj"
-        unet.config.encoder_hid_dim = 1024
-        unet.encoder_hid_proj = ImageProjection(
-            image_embed_dim=unet.config.encoder_hid_dim,
-            cross_attention_dim=unet.config.cross_attention_dim,
+        unet.encoder_hid_dim = image_encoder.config.hidden_size
+        unet.config.encoder_hid_dim = image_encoder.config.hidden_size
+        unet.encoder_hid_dim_type = "vip_image_proj"
+        unet.config.encoder_hid_dim_type = "vip_image_proj"
+        # convert IP-Adapter Image Projection layers to diffusers
+        image_projection = IPAdapterPlusImageProjection(
+            embed_dims=unet.config.encoder_hid_dim,
+            output_dims=unet.config.cross_attention_dim,
+            hidden_dims=unet.config.cross_attention_dim,
+            heads=12,
+            num_queries=16,
         )
+        unet.encoder_hid_proj = image_projection.to(device=accelerator.device, dtype=weight_dtype)
 
     # Move vae, unet to device and cast to weight_dtype
-    vae.requires_grad_(False)
-    vae.to(accelerator.device, dtype=weight_dtype)
     if args.train_cross_attn:
         unet.requires_grad_(False)
         train_unet_cross_attn(unet)
@@ -434,9 +460,9 @@ def main(args):
     train_dataset = ImageVariationDataset(
         dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
-        image_embedding_dir=args.image_embedding_dir,
+        clip_processor=feature_extractor,
         img_size=args.resolution,
-        drop_text=args.drop_text,
+        prob_uncond=args.prob_uncond,
         use_vos=args.use_vos,
     )
 
@@ -547,7 +573,10 @@ def main(args):
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
-                image_embeds = batch["image_embeds"].to(dtype=weight_dtype)
+                image_embeds = image_encoder(
+                    batch["ref_pixel_values"].to(dtype=weight_dtype),
+                    output_hidden_states=True).hidden_states[-2]
+                image_embeds = image_embeds * batch["uncond"].to(dtype=weight_dtype)
 
                 model_pred = unet(
                     sample=noisy_latents,

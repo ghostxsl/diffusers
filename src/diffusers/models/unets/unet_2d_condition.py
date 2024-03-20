@@ -43,6 +43,7 @@ from ..embeddings import (
     TextTimeEmbedding,
     TimestepEmbedding,
     Timesteps,
+    IPAdapterPlusImageProjection,
 )
 from ..modeling_utils import ModelMixin
 from .unet_2d_blocks import (
@@ -596,6 +597,14 @@ class UNet2DConditionModel(
                 image_embed_dim=encoder_hid_dim,
                 cross_attention_dim=cross_attention_dim,
             )
+        elif encoder_hid_dim_type == "vip_image_proj":
+            self.encoder_hid_proj = IPAdapterPlusImageProjection(
+                embed_dims=encoder_hid_dim,
+                output_dims=cross_attention_dim,
+                hidden_dims=cross_attention_dim,
+                heads=12,
+                num_queries=16,
+            )
         elif encoder_hid_dim_type is not None:
             raise ValueError(
                 f"`encoder_hid_dim_type`: {encoder_hid_dim_type} must be None, 'text_proj', 'text_image_proj', or 'image_proj'."
@@ -1015,7 +1024,7 @@ class UNet2DConditionModel(
 
             image_embeds = added_cond_kwargs.get("image_embeds")
             encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states, image_embeds)
-        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "image_proj":
+        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type in ["image_proj", "vip_image_proj"]:
             # Kandinsky 2.2 - style
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(
