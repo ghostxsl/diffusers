@@ -490,8 +490,8 @@ class DrawPose(object):
         self.hand_kpt_thr = hand_kpt_thr
         self.face_kpt_thr = face_kpt_thr
 
-    def draw_pose(self, src_img, points_dict):
-        _, height, width = F.get_dimensions(src_img)
+    def draw_pose(self, img_size, points_dict):
+        height, width = img_size
         if self.size == -1:
             canvas = np.zeros(shape=(height, width, 3), dtype=np.uint8)
             size_ = np.array([width, height])
@@ -521,9 +521,14 @@ class DrawPose(object):
 
         if 'condition' in data and 'image' in data:
             if isinstance(data['image'], Sequence) and isinstance(data['condition'], Sequence):
-                data['condition_image'] = [self.draw_pose(i, c) for i, c in zip(data['image'], data['condition'])]
+                out_cond = []
+                for img, cond in zip(data['image'], data['condition']):
+                    _, height, width = F.get_dimensions(img)
+                    out_cond.append(self.draw_pose((height, width), cond))
+                data['condition_image'] = out_cond
             else:
-                data['condition_image'] = self.draw_pose(data['image'], data['condition'])
+                _, height, width = F.get_dimensions(data['image'])
+                data['condition_image'] = self.draw_pose((height, width), data['condition'])
         else:
             raise Exception(f"Not found keys: [`image`, `condition`]")
 

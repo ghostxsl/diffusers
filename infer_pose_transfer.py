@@ -44,29 +44,30 @@ def parse_args():
         type=str,
         help="Directory to pose image.")
     parser.add_argument(
-        "--use_pose_infer",
-        default=True,
-        type=bool,
-        help="")
-    parser.add_argument(
         "--out_dir",
         default="output",
         type=str,
         help="Directory to save.")
+
+    parser.add_argument(
+        "--use_pose_infer",
+        default=False,
+        action="store_true",
+        help="")
     parser.add_argument(
         "--crop",
-        default=True,
-        type=bool,
+        default=False,
+        action="store_true",
         help="")
     parser.add_argument(
         "--matting",
-        default=True,
-        type=bool,
+        default=False,
+        action="store_true",
         help="")
     parser.add_argument(
         "--use_pad",
         default=False,
-        type=bool,
+        action="store_true",
         help="")
 
     parser.add_argument(
@@ -114,7 +115,7 @@ def parse_args():
     os.makedirs(args.out_dir, exist_ok=True)
 
     if len(args.resolution.split("x")) == 1:
-        args.resolution = int(args.resolution)
+        args.resolution = [int(args.resolution),] * 2
     elif len(args.resolution.split("x")) == 2:
         args.resolution = [int(r) for r in args.resolution.split("x")]
     else:

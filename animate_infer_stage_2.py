@@ -96,7 +96,7 @@ def get_reference_pose_frames(video_list, num_frames=25, stride=4):
         img = load_image(join(img_dir, name))
 
         pose = pkl_load(join(pose_dir, splitext(name)[0] + '.pose'))
-        pose = _draw.draw_pose(img, pose)
+        pose = _draw.draw_pose(img.size[::-1], pose)
 
         img = pad_image(img)
         pose = pad_image(pose, 0)
