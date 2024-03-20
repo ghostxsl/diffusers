@@ -18,6 +18,7 @@ __all__ = [
     'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5', 'crop_human_bbox',
+    'compute_OKS',
 ]
 
 
@@ -76,9 +77,16 @@ def i2i_collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    image_embeds = torch.stack([example["image_embeds"] for example in examples])
-    image_embeds = image_embeds.to(memory_format=torch.contiguous_format).float()
-    return {"pixel_values": pixel_values, "image_embeds": image_embeds}
+    ref_pixel_values = torch.cat([example["ref_pixel_values"] for example in examples])
+    ref_pixel_values = ref_pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    uncond = torch.stack([example["uncond"] for example in examples])
+    uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    return {
+        "pixel_values": pixel_values,
+        "ref_pixel_values": ref_pixel_values,
+        "uncond": uncond,
+    }
 
 
 def pkl_save(obj, file):
@@ -284,3 +292,64 @@ def crop_human_bbox(det_bbox, img_size, crop_size=(1024, 768), pad_bbox=5):
         return [x1, y1, x2, y2], pad_
     else:
         return det_bbox, None
+
+
+def compute_OKS(gt_kpts, gt_bboxes, dt_kpts, kpt_thr=0.3):
+    """
+    Args:
+        gt_kpts: shape [N, 18, 3]
+        gt_bboxes: shape [N, 4]
+        dt_kpts: shape [M, 18, 3]
+
+    Returns: ious(N, M)
+    """
+    assert len(gt_kpts) == len(gt_bboxes)
+    if len(gt_kpts) == 0 or len(dt_kpts) == 0:
+        return None
+
+    N, M = len(gt_kpts), len(dt_kpts)
+    ious = np.zeros([N, M])
+    sigmas = np.array([0.026, 0.079,
+                  0.079, 0.072, 0.062,
+                  0.079, 0.072, 0.062,
+                  0.107, 0.087, 0.089,
+                  0.107, 0.087, 0.089,
+                  0.025, 0.025, 0.035, 0.035])
+    vars = (sigmas * 2) ** 2
+
+    def oks_kernel(gts, dts, bbox_area, gt_valid_ind):
+        xg, yg, _ = np.split(gts[:, gt_valid_ind], 3, axis=-1)
+        xd, yd, _ = np.split(dts[:, gt_valid_ind], 3, axis=-1)
+        dx = xd - xg
+        dy = yd - yg
+        e = (dx[..., 0] ** 2 + dy[..., 0] ** 2) / vars[gt_valid_ind] / (bbox_area + np.spacing(1)) / 2
+        out = np.sum(np.exp(-e), axis=-1) / len(gt_valid_ind)
+        return out
+
+    # 0. 计算检出的关键点
+    gts_valid = gt_kpts[..., 2] > kpt_thr
+    num_gts_valid = np.sum(gts_valid, axis=1)
+
+    dts_valid = dt_kpts[..., 2] > kpt_thr
+    num_dts_valid = np.sum(dts_valid, axis=1)
+
+    for i in range(N):
+        if num_gts_valid[i] == 0:
+            continue
+
+        gt_valid_ind = np.nonzero(gts_valid[i])[0]
+        # 1. 计算gt与dt的similarity
+        gt_bbox = gt_bboxes[i]
+        bw, bh = gt_bbox[2] - gt_bbox[0], gt_bbox[3] - gt_bbox[1]
+        bbox_area = bw * bh
+        ious[i] = oks_kernel(gt_kpts[i: i + 1], dt_kpts, bbox_area, gt_valid_ind)
+
+        # 2. 保留gt与dt完全匹配的关键点similarity, 降低不完全匹配的关键点similarity
+        contain_dts_ind = np.nonzero(
+            np.sum(dts_valid[:, gt_valid_ind], axis=1) == len(gt_valid_ind))[0]
+        same_dts_ind = np.intersect1d(
+            contain_dts_ind, np.nonzero(num_dts_valid == len(gt_valid_ind))[0])
+        not_same_dts_ind = np.setdiff1d(np.arange(M), same_dts_ind)
+        ious[i, not_same_dts_ind] -= 1.
+
+    return ious

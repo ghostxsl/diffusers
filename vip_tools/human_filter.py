@@ -1,11 +1,9 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import os
 import argparse
-from os.path import join, splitext, exists, basename
+from os.path import join, basename
 from tqdm import tqdm
 import numpy as np
-from PIL import Image
-import torch
 
 from diffusers.utils.vip_utils import *
 from diffusers.data.utils import *
@@ -33,6 +31,11 @@ def parse_args():
         default=None,
         type=str,
         help="Path to image list on vos.")
+    parser.add_argument(
+        "--bbox_thr",
+        default=0.2,
+        type=float,
+        help="")
 
     parser.add_argument(
         "--rank",
@@ -82,7 +85,7 @@ def main(args):
         wholebodypose_cfg=join(POSE_CONFIG_DIR, "dwpose_l_wholebody_384x288.py"),
         wholebodypose_pth=join(weight_dir, "extensions/dw-ll_ucoco_384.pth"),
         device=device,
-        bbox_thr=0.1,
+        bbox_thr=args.bbox_thr,
     )
     parsing_infer = HumanParsing(
         model_path=join(weight_dir, "extensions/deeplabv3plus-xception-vocNov14_20-51-38_epoch-89.pth"),
@@ -137,7 +140,6 @@ def main(args):
                 label_parsing = parsing_infer(img)
                 img_area = img.width * img.height
                 if np.sum(label_parsing == 2) / img_area > parsing_thr or np.sum(
-                    label_parsing == 10) / img_area > parsing_thr or np.sum(
                     label_parsing == 13) / img_area > parsing_thr or np.sum(
                     label_parsing == 14) / img_area > parsing_thr or np.sum(
                     label_parsing == 15) / img_area > parsing_thr or np.sum(

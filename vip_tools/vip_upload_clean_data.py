@@ -58,11 +58,11 @@ if __name__ == '__main__':
     name2hash = load_file(args.name2hash)
 
     hash2name = {}
-    for name in pose_list:
+    for name in tqdm(pose_list):
         if splitext(name)[0] in name2hash:
             hash_ = name2hash[splitext(name)[0]]
             hash2name[hash_] = splitext(name)[0]
-    print(len(name2hash), len(hash2name))
+    print(len(pose_list), len(hash2name))
 
     vos_client = VOSClient()
 
@@ -88,8 +88,8 @@ if __name__ == '__main__':
                 except:
                     damaged.append(hash_)
         if temp:
-            out_dict[k] = temp
+            out_dict[k] = list(set(temp))
 
-    pkl_save(out_dict, f"./{splitext(args.group2hash)[0]}_filtered.group2hash")
+    pkl_save(out_dict, f"{splitext(args.group2hash)[0]}_filtered.group2hash")
     print('Done!')
     print(damaged)

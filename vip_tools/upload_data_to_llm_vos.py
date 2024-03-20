@@ -50,7 +50,8 @@ if __name__ == '__main__':
                 vos_client.upload_vos_pil(
                     img,
                     join(args.save_dir, splitext(name)[0] + '.jpg'),
-                    format='jpeg'
+                    format='jpeg',
+                    quality=90,
                 )
             elif args.data_type == "pickle":
                 pkl_obj = pkl_load(join(args.data_dir, name))

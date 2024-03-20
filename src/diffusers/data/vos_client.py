@@ -73,5 +73,5 @@ class VOSClient:
         return s3_response_object['DeleteMarker']
 
     def list_vos_files(self, s3_path):
-        s3_response_object = self.s3_client.list_objects_v2(Bucket=self.bucket, Key=s3_path)
+        s3_response_object = self.s3_client.list_objects_v2(Bucket=self.bucket, Prefix=s3_path)
         return s3_response_object['Contents']

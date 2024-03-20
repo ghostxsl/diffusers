@@ -120,6 +120,7 @@ def f3_merge_duplicate_group(group_file, name2group_file, cache_file):
             else:
                 unique_dict[new_k] += v
         elif sum(temp) < max(temp) * len(temp):
+            done_list.add(k)
             new_k = get_str_md5(k)
             if new_k not in unique_dict:
                 unique_dict[new_k] = v
