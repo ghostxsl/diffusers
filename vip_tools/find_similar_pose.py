@@ -34,6 +34,11 @@ def parse_args():
         type=str,
         help="Directory to pose image.")
     parser.add_argument(
+        "--pose_lib",
+        default=None,
+        type=str,
+        help="Path to pose lib.")
+    parser.add_argument(
         "--out_dir",
         default="output",
         type=str,
@@ -108,6 +113,10 @@ class FindSimilarPose(object):
         self.weight_dir = args.weight_dir or join(ROOT_DIR, "weights")
         self.device = args.device
         self.dtype = args.dtype
+        if args.pose_lib:
+            self.pose_lib = load_file(args.pose_lib)
+        else:
+            self.pose_lib = self.load_pose_lib(args.pose_dir)
 
         self.pose_infer = HumanPose(
             det_cfg=join(POSE_CONFIG_DIR, "rtmdet_l_8xb32-300e_coco.py"),
@@ -120,7 +129,6 @@ class FindSimilarPose(object):
             device=self.device,
             bbox_thr=0.2,
         )
-        self.pose_lib = self.load_pose_lib(args.pose_dir)
 
     def normalize_pose(self, pose, crop_size):
         ch, cw = crop_size
@@ -187,7 +195,7 @@ class FindSimilarPose(object):
         canvas = draw_bodypose(canvas, pose[..., :2], pose[..., 2] > kpt_thr)
         return Image.fromarray(canvas)
 
-    def topk_pose(self, pose, topk=1):
+    def topk_pose(self, pose, topk=1, pose_label="dts"):
         w, h = pose['width'], pose['height']
         kpts = pose['body']['keypoints'][0:1] * np.array([w, h, 1.])
         out_pose_img = [self.draw_pose(kpts, (h, w))]
@@ -196,13 +204,13 @@ class FindSimilarPose(object):
         n_ratio, pad_shift, bbox = affine_params
         # 计算OKS相似度
         norm_pose_img = [self.draw_pose(norm_pose, self.infer_size)]
-        oks = compute_OKS(norm_pose, bbox[None], self.pose_lib['dts'])[0]
+        oks = compute_OKS(norm_pose, bbox[None], self.pose_lib[pose_label])[0]
         topk_ind = np.argsort(-oks)
         while oks[topk_ind[0]] > self.topk_thr:
             topk_ind = np.delete(topk_ind, 0)
 
         for i in range(topk):
-            t_pose = self.pose_lib['dts'][topk_ind[i]]
+            t_pose = self.pose_lib[pose_label][topk_ind[i]]
             norm_pose_img.append(self.draw_pose(t_pose[None], self.infer_size))
 
             t_pose[..., :2] /= n_ratio
@@ -212,14 +220,14 @@ class FindSimilarPose(object):
 
         return norm_pose_img, out_pose_img
 
-    def __call__(self, image, topk=1, **kwargs):
+    def __call__(self, image, topk=1, pose_label="dts", **kwargs):
         # 推理pose
         _, pose = self.pose_infer(image, body=False, hand=False)
         if len(pose['body']['bboxes']) == 0:
             return None, None
 
         # topk相似pose
-        norm_pose_img, out_pose_img = self.topk_pose(pose, topk)
+        norm_pose_img, out_pose_img = self.topk_pose(pose, topk, pose_label)
 
         return norm_pose_img, out_pose_img
 
@@ -245,6 +253,17 @@ def get_img_path_list(img_file=None, img_dir=None):
 
 
 def main(args):
+    gender_map = {
+        "男性": "man",
+        "女性": "woman",
+        "男童": "boy",
+        "女童": "girl",
+        "man": "man",
+        "woman": "woman",
+        "boy": "boy",
+        "girl": "girl",
+    }
+
     find_sim_pose = FindSimilarPose(args)
     ref_img_list = get_img_path_list(args.ref_img, args.ref_dir)
 
@@ -252,9 +271,13 @@ def main(args):
         try:
             t1 = time.time()
             print(f"{i + 1}: {file}")
+            name = basename(file)
             ref_img = load_image(file)
 
-            norm_pose_img, out_pose_img = find_sim_pose(ref_img, topk=args.topk)
+            pose_label = name.split('_')[0]
+            pose_label = "dts" if pose_label not in gender_map else gender_map[pose_label]
+            norm_pose_img, out_pose_img = find_sim_pose(
+                ref_img, topk=args.topk, pose_label=pose_label)
             if out_pose_img is None:
                 print(f"Error: reference image no bbox: {file}")
                 continue

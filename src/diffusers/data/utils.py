@@ -11,7 +11,6 @@ import pandas
 import matplotlib
 import numpy as np
 
-
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
     'i2i_collate_fn',
@@ -64,12 +63,19 @@ def animate_collate_fn(examples):
     else:
         reference_image = torch.zeros([0])
 
+    if 'uncond' in examples[0]:
+        uncond = torch.stack([example["uncond"] for example in examples])
+        uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    else:
+        uncond = torch.zeros([0])
+
     return {
         "pixel_values": pixel_values,
         "conditioning_pixel_values": conditioning_pixel_values,
         "reference_pixel_values": reference_pixel_values,
         "input_ids": input_ids,
         "reference_image": reference_image,
+        "uncond": uncond,
     }
 
 
@@ -77,11 +83,18 @@ def i2i_collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    ref_pixel_values = torch.cat([example["ref_pixel_values"] for example in examples])
-    ref_pixel_values = ref_pixel_values.to(memory_format=torch.contiguous_format).float()
+    if 'ref_pixel_values' in examples[0]:
+        ref_pixel_values = torch.cat([example["ref_pixel_values"] for example in examples])
+        ref_pixel_values = ref_pixel_values.to(memory_format=torch.contiguous_format).float()
+    else:
+        ref_pixel_values = torch.zeros([0])
 
-    uncond = torch.stack([example["uncond"] for example in examples])
-    uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    if 'uncond' in examples[0]:
+        uncond = torch.stack([example["uncond"] for example in examples])
+        uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    else:
+        uncond = torch.zeros([0])
+
     return {
         "pixel_values": pixel_values,
         "ref_pixel_values": ref_pixel_values,
@@ -310,11 +323,11 @@ def compute_OKS(gt_kpts, gt_bboxes, dt_kpts, kpt_thr=0.3):
     N, M = len(gt_kpts), len(dt_kpts)
     ious = np.zeros([N, M])
     sigmas = np.array([0.026, 0.079,
-                  0.079, 0.072, 0.062,
-                  0.079, 0.072, 0.062,
-                  0.107, 0.087, 0.089,
-                  0.107, 0.087, 0.089,
-                  0.025, 0.025, 0.035, 0.035])
+                       0.079, 0.072, 0.062,
+                       0.079, 0.072, 0.062,
+                       0.107, 0.087, 0.089,
+                       0.107, 0.087, 0.089,
+                       0.025, 0.025, 0.035, 0.035])
     vars = (sigmas * 2) ** 2
 
     def oks_kernel(gts, dts, bbox_area, gt_valid_ind):

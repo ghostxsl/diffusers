@@ -31,12 +31,10 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from tqdm.auto import tqdm
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
 import diffusers
 from diffusers.schedulers import DDPMScheduler
-from diffusers.models.vip.unet_2d_condition import VIPUNet2DConditionModel
-from diffusers.models.embeddings import IPAdapterPlusImageProjection
+from diffusers.models.vip import VIPUNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr, cast_training_params
 from diffusers.utils.import_utils import is_xformers_available
@@ -44,13 +42,6 @@ from diffusers.data import ImageVariationDataset, i2i_collate_fn
 
 
 logger = get_logger(__name__)
-
-
-def train_unet_cross_attn(unet):
-    for name, param in unet.named_parameters():
-        if 'attn2' in name or 'encoder_hid_proj' in name:
-            param.requires_grad = True
-    return unet
 
 
 def parse_args():
@@ -61,19 +52,9 @@ def parse_args():
         default=None,
     )
     parser.add_argument(
-        "--image_encoder_model_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--train_cross_attn",
-        action="store_true",
-        help="Whether to train cross_attn",
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
-        default="image_variation",
+        default="pixel_vip",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -112,14 +93,14 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=768,
+        default=512,
         help=(
             "The resolution for input images, all the images in the train"
             " dataset will be resized to this resolution"
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -169,7 +150,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-5,
+        default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -181,14 +162,14 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="constant_with_warmup",
+        default="constant",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=1000, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -281,12 +262,10 @@ def parse_args():
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-    # kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         project_config=accelerator_project_config,
-        # kwargs_handlers=[kwargs],
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -341,18 +320,6 @@ def main(args):
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # import correct image encoder class
-    feature_extractor = CLIPImageProcessor()
-    if args.image_encoder_model_path:
-        image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.image_encoder_model_path)
-    else:
-        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            args.pretrained_model_path, subfolder="image_encoder")
-
-    # Move image_encoder to device and cast to weight_dtype
-    image_encoder.requires_grad_(False)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
-
     # Load scheduler and models
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=1000,
@@ -370,18 +337,11 @@ def main(args):
     else:
         unet = VIPUNet2DConditionModel(
             sample_size=args.resolution,
-            block_out_channels=(192, 384, 768, 768),
-            cross_attention_dim=768,
-            encoder_hid_dim=image_encoder.config.hidden_size,
-            encoder_hid_dim_type="vip_image_proj",
-
+            block_out_channels=(128, 256, 512, 512),
+            layers_per_block=(1, 1, 2, 2),
+            cross_attention_dim=None,
+            compression_ratio=2,
         )
-
-    if args.train_cross_attn:
-        # Move unet to device and cast to weight_dtype
-        unet.requires_grad_(False)
-        train_unet_cross_attn(unet)
-        cast_training_params(unet)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -436,7 +396,7 @@ def main(args):
     train_dataset = ImageVariationDataset(
         dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
-        clip_processor=feature_extractor,
+        clip_processor=None,
         img_size=args.resolution,
         prob_uncond=args.prob_uncond,
         use_vos=args.use_vos,
@@ -545,17 +505,10 @@ def main(args):
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Get the text embedding for conditioning
-                image_embeds = image_encoder(
-                    batch["ref_pixel_values"].to(dtype=weight_dtype),
-                    output_hidden_states=True).hidden_states[-2]
-                image_embeds = image_embeds * batch["uncond"].to(dtype=weight_dtype)
-
                 model_pred = unet(
                     sample=noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=None,
-                    added_cond_kwargs={'image_embeds': image_embeds},
                     return_dict=False,
                 )[0]
 
