@@ -1,4 +1,5 @@
 # Copyright 2024 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The VIP Inc. AIGC team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 import torch.utils.checkpoint
 
 from ...configuration_utils import ConfigMixin, register_to_config
@@ -32,7 +34,6 @@ from ..attention_processor import (
 )
 from ..embeddings import (
     GaussianFourierProjection,
-    GLIGENTextBoundingboxProjection,
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
@@ -52,6 +53,48 @@ from diffusers.models.unets.unet_2d_blocks import (
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+class ControlNetConditioningEmbedding(nn.Module):
+    """
+    Quoting from https://arxiv.org/abs/2302.05543: "Stable Diffusion uses a pre-processing method similar to VQ-GAN
+    [11] to convert the entire dataset of 512 × 512 images into smaller 64 × 64 “latent images” for stabilized
+    training. This requires ControlNets to convert image-based conditions to 64 × 64 feature space to match the
+    convolution size. We use a tiny network E(·) of four convolution layers with 4 × 4 kernels and 2 × 2 strides
+    (activated by ReLU, channels are 16, 32, 64, 128, initialized with Gaussian weights, trained jointly with the full
+    model) to encode image-space conditions ... into feature maps ..."
+    """
+
+    def __init__(
+        self,
+        conditioning_embedding_channels: int,
+        conditioning_channels: int = 3,
+        block_out_channels: Tuple[int, ...] = (32, 64, 128),
+    ):
+        super().__init__()
+
+        self.conv_in = nn.Conv2d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
+
+        self.blocks = nn.ModuleList([])
+
+        for i in range(len(block_out_channels) - 1):
+            channel_in = block_out_channels[i]
+            channel_out = block_out_channels[i + 1]
+            self.blocks.append(nn.Conv2d(channel_in, channel_out, kernel_size=3, padding=1))
+
+        self.conv_out = nn.Conv2d(block_out_channels[-1], conditioning_embedding_channels, kernel_size=3, padding=1)
+
+    def forward(self, conditioning):
+        embedding = self.conv_in(conditioning)
+        embedding = F.silu(embedding)
+
+        for block in self.blocks:
+            embedding = block(embedding)
+            embedding = F.silu(embedding)
+
+        embedding = self.conv_out(embedding)
+
+        return embedding
 
 
 @dataclass
@@ -166,17 +209,17 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
         flip_sin_to_cos: bool = True,
         freq_shift: int = 0,
         down_block_types: Tuple[str] = (
-            "CrossAttnDownBlock2D",
-            "CrossAttnDownBlock2D",
-            "CrossAttnDownBlock2D",
+            "VIPCrossAttnDownBlock2D",
+            "VIPCrossAttnDownBlock2D",
+            "VIPCrossAttnDownBlock2D",
             "DownBlock2D",
         ),
-        mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
+        mid_block_type: Optional[str] = "VIPUNetMidBlock2DCrossAttn",
         up_block_types: Tuple[str] = (
             "UpBlock2D",
-            "CrossAttnUpBlock2D",
-            "CrossAttnUpBlock2D",
-            "CrossAttnUpBlock2D"
+            "VIPCrossAttnUpBlock2D",
+            "VIPCrossAttnUpBlock2D",
+            "VIPCrossAttnUpBlock2D"
         ),
         only_cross_attention: Union[bool, Tuple[bool]] = False,
         block_out_channels: Tuple[int] = (192, 384, 768, 768),
@@ -187,10 +230,10 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
         act_fn: str = "silu",
         norm_num_groups: Optional[int] = 32,
         norm_eps: float = 1e-5,
-        cross_attention_dim: Union[int, Tuple[int]] = 768,
+        cross_attention_dim: Optional[int] = None,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
-        encoder_hid_dim: Optional[int] = 1280,
-        encoder_hid_dim_type: Optional[str] = "vip_image_proj",
+        encoder_hid_dim: Optional[int] = None,
+        encoder_hid_dim_type: Optional[str] = None,
         attention_head_dim: Union[int, Tuple[int]] = 8,
         num_attention_heads: Optional[Union[int, Tuple[int]]] = None,
         use_linear_projection: bool = False,
@@ -215,6 +258,10 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
         mid_block_only_cross_attention: Optional[bool] = None,
         cross_attention_norm: Optional[str] = None,
         addition_embed_type_num_heads: int = 64,
+        use_cond_embed: bool = False,
+        conditioning_embedding_out_channels: Tuple[int, ...] = (32, 64, 128),
+        use_kv_compression: bool = False,
+        compression_ratio: int = 2,
     ):
         super().__init__()
 
@@ -320,7 +367,7 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
         if isinstance(attention_head_dim, int):
             attention_head_dim = (attention_head_dim,) * len(down_block_types)
 
-        if isinstance(cross_attention_dim, int):
+        if not isinstance(cross_attention_dim, list):
             cross_attention_dim = (cross_attention_dim,) * len(down_block_types)
 
         if isinstance(layers_per_block, int):
@@ -351,13 +398,14 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
                 in_channels=input_channel,
                 out_channels=output_channel,
                 temb_channels=blocks_time_embed_dim,
+                dropout=dropout,
                 add_downsample=not is_final_block,
                 resnet_eps=norm_eps,
                 resnet_act_fn=act_fn,
                 resnet_groups=norm_num_groups,
+                downsample_padding=downsample_padding,
                 cross_attention_dim=cross_attention_dim[i],
                 num_attention_heads=num_attention_heads[i],
-                downsample_padding=downsample_padding,
                 use_linear_projection=use_linear_projection,
                 only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
@@ -367,31 +415,34 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
                 resnet_out_scale_factor=resnet_out_scale_factor,
                 cross_attention_norm=cross_attention_norm,
                 attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
-                dropout=dropout,
+                use_kv_compression=use_kv_compression,
+                compression_ratio=compression_ratio,
             )
             self.down_blocks.append(down_block)
 
         # mid
         self.mid_block = get_mid_block(
             mid_block_type,
-            temb_channels=blocks_time_embed_dim,
             in_channels=block_out_channels[-1],
+            temb_channels=blocks_time_embed_dim,
+            dropout=dropout,
+            transformer_layers_per_block=transformer_layers_per_block[-1],
             resnet_eps=norm_eps,
+            resnet_time_scale_shift=resnet_time_scale_shift,
             resnet_act_fn=act_fn,
             resnet_groups=norm_num_groups,
-            output_scale_factor=mid_block_scale_factor,
-            transformer_layers_per_block=transformer_layers_per_block[-1],
             num_attention_heads=num_attention_heads[-1],
+            output_scale_factor=mid_block_scale_factor,
             cross_attention_dim=cross_attention_dim[-1],
             use_linear_projection=use_linear_projection,
             mid_block_only_cross_attention=mid_block_only_cross_attention,
             upcast_attention=upcast_attention,
-            resnet_time_scale_shift=resnet_time_scale_shift,
             attention_type=attention_type,
             resnet_skip_time_act=resnet_skip_time_act,
             cross_attention_norm=cross_attention_norm,
             attention_head_dim=attention_head_dim[-1],
-            dropout=dropout,
+            use_kv_compression=use_kv_compression,
+            compression_ratio=compression_ratio,
         )
 
         # count how many layers upsample the images
@@ -445,6 +496,8 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
                 cross_attention_norm=cross_attention_norm,
                 attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
                 dropout=dropout,
+                use_kv_compression=use_kv_compression,
+                compression_ratio=compression_ratio,
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
@@ -466,7 +519,14 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
             block_out_channels[0], out_channels, kernel_size=conv_out_kernel, padding=conv_out_padding
         )
 
-        self._set_pos_net_if_use_gligen(attention_type=attention_type, cross_attention_dim=cross_attention_dim)
+        # pose guider
+        self.use_cond_embed = use_cond_embed
+        if self.use_cond_embed:
+            self.controlnet_cond_embedding = ControlNetConditioningEmbedding(
+                conditioning_embedding_channels=block_out_channels[0],
+                conditioning_channels=in_channels,
+                block_out_channels=conditioning_embedding_out_channels,
+            )
 
     def _check_config(
         self,
@@ -667,19 +727,6 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
             self.add_embedding = ImageHintTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
         elif addition_embed_type is not None:
             raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
-
-    def _set_pos_net_if_use_gligen(self, attention_type: str, cross_attention_dim: int):
-        if attention_type in ["gated", "gated-text-image"]:
-            positive_len = 768
-            if isinstance(cross_attention_dim, int):
-                positive_len = cross_attention_dim
-            elif isinstance(cross_attention_dim, tuple) or isinstance(cross_attention_dim, list):
-                positive_len = cross_attention_dim[0]
-
-            feature_type = "text-only" if attention_type == "gated" else "text-image"
-            self.position_net = GLIGENTextBoundingboxProjection(
-                positive_len=positive_len, out_dim=cross_attention_dim, feature_type=feature_type
-            )
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -1032,15 +1079,13 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
         self,
         sample: torch.FloatTensor,
         timestep: Union[torch.Tensor, float, int],
-        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        controlnet_cond: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
-        down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
-        mid_block_additional_residual: Optional[torch.Tensor] = None,
-        down_intrablock_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[UNet2DConditionOutput, Tuple]:
@@ -1069,12 +1114,6 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
             added_cond_kwargs: (`dict`, *optional*):
                 A kwargs dictionary containing additional embeddings that if specified are added to the embeddings that
                 are passed along to the UNet blocks.
-            down_block_additional_residuals: (`tuple` of `torch.Tensor`, *optional*):
-                A tuple of tensors that if specified are added to the residuals of down unet blocks.
-            mid_block_additional_residual: (`torch.Tensor`, *optional*):
-                A tensor that if specified is added to the residual of the middle unet block.
-            down_intrablock_additional_residuals (`tuple` of `torch.Tensor`, *optional*):
-                additional residuals to be added within UNet down blocks, for example from T2I-Adapter side model(s)
             encoder_attention_mask (`torch.Tensor`):
                 A cross-attention mask of shape `(batch, sequence_length)` is applied to `encoder_hidden_states`. If
                 `True` the mask is kept, otherwise if `False` it is discarded. Mask will be converted into a bias,
@@ -1155,12 +1194,9 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
 
         # 2. pre-process
         sample = self.conv_in(sample)
-
-        # 2.5 GLIGEN position net
-        if cross_attention_kwargs is not None and cross_attention_kwargs.get("gligen", None) is not None:
-            cross_attention_kwargs = cross_attention_kwargs.copy()
-            gligen_args = cross_attention_kwargs.pop("gligen")
-            cross_attention_kwargs["gligen"] = {"objs": self.position_net(**gligen_args)}
+        if self.use_cond_embed and controlnet_cond is not None:
+            controlnet_cond = self.controlnet_cond_embedding(controlnet_cond)
+            sample = sample + controlnet_cond
 
         # 3. down
         # we're popping the `scale` instead of getting it because otherwise `scale` will be propagated
@@ -1175,32 +1211,9 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
             # weight the lora layers by setting `lora_scale` for each PEFT layer
             scale_lora_layers(self, lora_scale)
 
-        is_controlnet = mid_block_additional_residual is not None and down_block_additional_residuals is not None
-        # using new arg down_intrablock_additional_residuals for T2I-Adapters, to distinguish from controlnets
-        is_adapter = down_intrablock_additional_residuals is not None
-        # maintain backward compatibility for legacy usage, where
-        #       T2I-Adapter and ControlNet both use down_block_additional_residuals arg
-        #       but can only use one or the other
-        if not is_adapter and mid_block_additional_residual is None and down_block_additional_residuals is not None:
-            deprecate(
-                "T2I should not use down_block_additional_residuals",
-                "1.3.0",
-                "Passing intrablock residual connections with `down_block_additional_residuals` is deprecated \
-                       and will be removed in diffusers 1.3.0.  `down_block_additional_residuals` should only be used \
-                       for ControlNet. Please make sure use `down_intrablock_additional_residuals` instead. ",
-                standard_warn=False,
-            )
-            down_intrablock_additional_residuals = down_block_additional_residuals
-            is_adapter = True
-
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                # For t2i-adapter CrossAttnDownBlock2D
-                additional_residuals = {}
-                if is_adapter and len(down_intrablock_additional_residuals) > 0:
-                    additional_residuals["additional_residuals"] = down_intrablock_additional_residuals.pop(0)
-
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -1208,25 +1221,11 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
                     attention_mask=attention_mask,
                     cross_attention_kwargs=cross_attention_kwargs,
                     encoder_attention_mask=encoder_attention_mask,
-                    **additional_residuals,
                 )
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
-                if is_adapter and len(down_intrablock_additional_residuals) > 0:
-                    sample += down_intrablock_additional_residuals.pop(0)
 
             down_block_res_samples += res_samples
-
-        if is_controlnet:
-            new_down_block_res_samples = ()
-
-            for down_block_res_sample, down_block_additional_residual in zip(
-                down_block_res_samples, down_block_additional_residuals
-            ):
-                down_block_res_sample = down_block_res_sample + down_block_additional_residual
-                new_down_block_res_samples = new_down_block_res_samples + (down_block_res_sample,)
-
-            down_block_res_samples = new_down_block_res_samples
 
         # 4. mid
         if self.mid_block is not None:
@@ -1241,17 +1240,6 @@ class VIPUNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMix
                 )
             else:
                 sample = self.mid_block(sample, emb)
-
-            # To support T2I-Adapter-XL
-            if (
-                is_adapter
-                and len(down_intrablock_additional_residuals) > 0
-                and sample.shape == down_intrablock_additional_residuals[0].shape
-            ):
-                sample += down_intrablock_additional_residuals.pop(0)
-
-        if is_controlnet:
-            sample = sample + mid_block_additional_residual
 
         # 5. up
         for i, upsample_block in enumerate(self.up_blocks):

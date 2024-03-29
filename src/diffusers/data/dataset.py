@@ -752,7 +752,7 @@ class PoseTransDataset(torch.utils.data.Dataset):
             dataset_file,
             train_data_dir,
             condition_data_dir,
-            clip_processor,
+            clip_processor=None,
             img_size=512,
             prob_uncond=0.1,
             matting_data_dir=None,
@@ -904,13 +904,14 @@ class PoseTransDataset(torch.utils.data.Dataset):
 
         example["pixel_values"] = self.img_normalize(data['image'])
         example["conditioning_pixel_values"] = data['condition_image']
-
-        if random.random() < self.prob_uncond:
-            data['reference_image'] = Image.new("RGB", data['reference_image'].size)
-
         example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
-        example["reference_image"] = self.clip_processor(
-            images=data["reference_image"], return_tensors="pt").pixel_values
+
+        example["uncond"] = torch.tensor(
+            [[[0.]]]) if random.random() < self.prob_uncond else torch.tensor([[[1.]]])
+
+        if self.clip_processor is not None:
+            example["reference_image"] = self.clip_processor(
+                images=data["reference_image"], return_tensors="pt").pixel_values
 
         return example
 
@@ -920,7 +921,7 @@ class ImageVariationDataset(torch.utils.data.Dataset):
             self,
             dataset_file,
             train_data_dir,
-            clip_processor,
+            clip_processor=None,
             img_size=512,
             prob_uncond=0.1,
             use_vos=False,
@@ -991,10 +992,11 @@ class ImageVariationDataset(torch.utils.data.Dataset):
 
         img = self.get_data(item)
         example["pixel_values"] = self.image_transforms(img)
-        example["ref_pixel_values"] = self.clip_processor(
-            images=img, return_tensors="pt").pixel_values
+        if self.clip_processor is not None:
+            example["ref_pixel_values"] = self.clip_processor(
+                images=img, return_tensors="pt").pixel_values
 
-        example["uncond"] = torch.tensor(
-            [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
+            example["uncond"] = torch.tensor(
+                [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
 
         return example

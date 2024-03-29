@@ -1,5 +1,6 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import os
+import random
 from os.path import join, exists, splitext, basename
 import argparse
 import time
@@ -48,6 +49,11 @@ def parse_args():
         type=str,
         help="Directory to pose image.")
     parser.add_argument(
+        "--pose_lib",
+        default=None,
+        type=str,
+        help="Path to pose lib.")
+    parser.add_argument(
         "--out_dir",
         default="output",
         type=str,
@@ -63,6 +69,11 @@ def parse_args():
         type=float,
         help="")
     parser.add_argument(
+        "--topk_stride",
+        default=None,
+        type=float,
+        help="")
+    parser.add_argument(
         "--display",
         default=False,
         action="store_true",
@@ -72,6 +83,11 @@ def parse_args():
         default=False,
         action="store_true",
         help="")
+    parser.add_argument(
+        "--restore_model_path",
+        default="/apps/dat/cv/xsl/weights/majicMIX-realistic-7",
+        type=str,
+        help="Path to restore model.")
 
     parser.add_argument(
         "--resolution",
@@ -85,7 +101,7 @@ def parse_args():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/exp_animate/checkpoint-100000",
+        default="/apps/dat/cv/xsl/exp_animate/vip_230k",
     )
     parser.add_argument(
         "--vae_model_path",
@@ -137,11 +153,15 @@ class PoseTransfer(object):
     def __init__(self, args):
         self.args = args
         self.topk_thr = args.topk_thr
+        self.topk_stride = args.topk_stride
         self.infer_size = args.resolution
         self.weight_dir = args.weight_dir or join(ROOT_DIR, "weights")
         self.device = args.device
         self.dtype = args.dtype
-        self.pose_lib = self.load_pose_lib(args.pose_dir)
+        if args.pose_lib:
+            self.pose_lib = load_file(args.pose_lib)
+        else:
+            self.pose_lib = self.load_pose_lib(args.pose_dir)
 
         vae = AutoencoderKL.from_pretrained(args.vae_model_path).to(self.device, dtype=self.dtype)
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(
@@ -192,7 +212,7 @@ class PoseTransfer(object):
                 torch_dtype=self.dtype).to(self.device)
 
             self.restore_pipe = VIPStableDiffusionControlNetInpaintPipeline.from_pretrained(
-                "/xsl/wilson.xu/weights/majicmixRealistic_v7",
+                args.restore_model_path,
                 controlnet=controlnet, torch_dtype=self.dtype).to(self.device)
 
             load_webui_textual_inversion(join(self.weight_dir, "embedding"), self.restore_pipe)
@@ -388,7 +408,36 @@ class PoseTransfer(object):
         canvas = draw_bodypose(canvas, pose[..., :2], pose[..., 2] > kpt_thr)
         return Image.fromarray(canvas)
 
-    def topk_pose(self, pose, topk=1):
+    def topk_sampling(self, oks, topk=1):
+        topk_ind = np.argsort(-oks)
+        out_ind, out_val = [], []
+        if self.topk_stride is not None:
+            sroted_oks = oks[topk_ind]
+            stride_interval = np.linspace(1, -1, int(2 / self.topk_stride) + 1)
+
+            ii = 0
+            for h, l in zip(stride_interval[:-1], stride_interval[1:]):
+                if len(out_ind) == topk:
+                    break
+
+                temp_ind, temp_val = [], []
+                while sroted_oks[ii] >= l and sroted_oks[ii] < h:
+                    temp_ind.append(topk_ind[ii])
+                    temp_val.append(sroted_oks[ii])
+                    ii += 1
+                if self.topk_thr >= l:
+                    ind = random.choice(temp_ind)
+                    out_ind.append(ind)
+                    out_val.append(oks[ind])
+        else:
+            while oks[topk_ind[0]] > self.topk_thr:
+                topk_ind = np.delete(topk_ind, 0)
+            out_ind = [int(topk_ind[i]) for i in range(topk)]
+            out_val = [oks[i] for i in out_ind]
+
+        return out_ind, out_val
+
+    def topk_pose(self, pose, topk=1, pose_label="dts"):
         w, h = pose['width'], pose['height']
         bboxes = pose['body']['bboxes']
         kpts = pose['body']['keypoints']
@@ -397,26 +446,25 @@ class PoseTransfer(object):
         kpts = kpts[0: 1] * np.array([w, h, 1.])
         # 计算OKS相似度
         src_pose_img = self.draw_pose(kpts, self.infer_size)
-        oks = compute_OKS(kpts, bbox, self.pose_lib['dts'])[0]
-        topk_ind = np.argsort(-oks)
-        while oks[topk_ind[0]] > self.topk_thr:
-            topk_ind = np.delete(topk_ind, 0)
+        oks = compute_OKS(kpts, bbox, self.pose_lib[pose_label])[0]
+
+        topk_ind, topk_oks = self.topk_sampling(oks, topk)
 
         out_pose_img = []
-        for i in range(topk):
-            pose = self.pose_lib['dts'][topk_ind[i]]
+        for ind, pose_similarity in zip(topk_ind, topk_oks):
+            pose = self.pose_lib['dts'][ind]
             out_pose_img.append(self.draw_pose(pose[None], self.infer_size))
 
         return out_pose_img, src_pose_img
 
-    def __call__(self, image, topk=1, **kwargs):
+    def __call__(self, image, topk=1, pose_label="dts", **kwargs):
         # 推理pose
         _, pose = self.pose_infer(image, body=False, hand=False)
         if len(pose['body']['bboxes']) == 0:
             return None, None
 
         # topk相似pose
-        topk_pose_img, src_pose_img = self.topk_pose(pose, topk)
+        topk_pose_img, src_pose_img = self.topk_pose(pose, topk, pose_label)
 
         out_img = []
         generator = get_torch_generator(get_fixed_seed(-1), device=self.device)
@@ -457,6 +505,17 @@ def get_img_path_list(img_file=None, img_dir=None):
 
 
 def main(args):
+    gender_map = {
+        "男性": "man",
+        "女性": "woman",
+        "男童": "boy",
+        "女童": "girl",
+        "man": "man",
+        "woman": "woman",
+        "boy": "boy",
+        "girl": "girl",
+    }
+
     pose_trans = PoseTransfer(args)
     ref_img_list = get_img_path_list(args.ref_img, args.ref_dir)
 
@@ -464,6 +523,7 @@ def main(args):
         try:
             t1 = time.time()
             print(f"{i + 1}: {file}")
+            name = basename(file)
             ref_img = load_image(file)
             crop_img, crop_bbox, pad_border = pose_trans.crop_image(ref_img)
             if crop_img is None:
@@ -475,7 +535,9 @@ def main(args):
                 print(f"Error2: crop image no matting: {file}")
                 continue
 
-            res, dis_pose = pose_trans(matting_img, topk=args.topk)
+            pose_label = name.split('_')[0]
+            pose_label = "dts" if pose_label not in gender_map else gender_map[pose_label]
+            res, dis_pose = pose_trans(matting_img, topk=args.topk, pose_label=pose_label)
             if res is None:
                 print(f"Error3: matting image no pose: {file}")
                 continue
@@ -497,10 +559,10 @@ def main(args):
                     out_imgs = np.concatenate([out_imgs, restore_imgs, dis_pose])
                 else:
                     out_imgs = np.concatenate([out_imgs, dis_pose])
-                Image.fromarray(out_imgs).save(join(args.out_dir, basename(file)))
+                Image.fromarray(out_imgs).save(join(args.out_dir, name))
             else:
                 for j, im in enumerate(out_imgs):
-                    im.save(join(args.out_dir, splitext(basename(file))[0] + f'_{j}.jpg'))
+                    im.save(join(args.out_dir, splitext(name)[0] + f'_{j}.jpg'))
             t2 = time.time()
             print(f"time: {t2 - t1}s")
         except Exception as e:

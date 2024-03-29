@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional
 from .attention import BasicTransformerBlock, _chunked_feed_forward
 from .unets.unet_3d_blocks import TransformerTemporalModel
 from .referencenet import AttnIdentity
+from .transformers.vip_transformer_2d import VIPBasicTransformerBlock
+from .vip.pt_referencenet import InnerAttnIdentity
 
 
 def torch_attn_dfs(model, prefix=""):
@@ -23,9 +25,9 @@ def torch_attn_dfs(model, prefix=""):
     for name, child in model.named_children():
         if name == 'motion_modules' or isinstance(child, TransformerTemporalModel):
             continue
-        elif isinstance(child, BasicTransformerBlock):
+        elif isinstance(child, (BasicTransformerBlock, VIPBasicTransformerBlock)):
             result.append([prefix + f".{name}", child])
-        elif isinstance(child, AttnIdentity):
+        elif isinstance(child, (AttnIdentity, InnerAttnIdentity)):
             result.append([prefix + f".{name}", child])
         else:
             result += torch_attn_dfs(child, prefix=prefix + f".{name}")
@@ -33,12 +35,13 @@ def torch_attn_dfs(model, prefix=""):
 
 
 class ReferenceAttentionControl(object):
-    def __init__(self, unet, fusion_blocks="full"):
-        assert fusion_blocks in ["midup", "full"]
+    def __init__(self, unet, fusion_blocks="full", hack_type="default"):
+        assert fusion_blocks in ["midup", "full", "down_flip"]
 
         # Modify self attention
         self.unet = unet
         self.fusion_blocks = fusion_blocks
+        self.hack_type = hack_type
         self.register_reference_hooks()
 
     def register_reference_hooks(self):
@@ -169,14 +172,75 @@ class ReferenceAttentionControl(object):
 
             return hidden_states
 
+        def hacked_vip_basic_transformer_inner_forward(
+            self,
+            hidden_states: torch.FloatTensor,
+            attention_mask: Optional[torch.FloatTensor] = None,
+            encoder_hidden_states: Optional[torch.FloatTensor] = None,
+            encoder_attention_mask: Optional[torch.FloatTensor] = None,
+            timestep: Optional[torch.LongTensor] = None,
+            cross_attention_kwargs: Dict[str, Any] = None,
+            compress_hidden_states: Optional[torch.FloatTensor] = None,
+        ) -> torch.FloatTensor:
+            # Notice that normalization is always applied before the real computation in the following blocks.
+            # 1. Self-Attention
+            norm_hidden_states = self.norm1(hidden_states)
+
+            if self.pos_embed is not None:
+                norm_hidden_states = self.pos_embed(norm_hidden_states)
+
+            cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+
+            attn_output = self.attn1(
+                norm_hidden_states,
+                encoder_hidden_states=self.bank if self.bank is not None else compress_hidden_states,
+                attention_mask=attention_mask,
+                **cross_attention_kwargs,
+            )
+
+            hidden_states = attn_output + hidden_states
+            if hidden_states.ndim == 4:
+                hidden_states = hidden_states.squeeze(1)
+
+            # 2. Cross-Attention
+            if self.attn2 is not None:
+                norm_hidden_states = self.norm2(hidden_states)
+
+                if self.pos_embed is not None and self.norm_type != "ada_norm_single":
+                    norm_hidden_states = self.pos_embed(norm_hidden_states)
+
+                attn_output = self.attn2(
+                    norm_hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    attention_mask=encoder_attention_mask,
+                    **cross_attention_kwargs,
+                )
+                hidden_states = attn_output + hidden_states
+
+            # 3. Feed-forward
+            if self._chunk_size is not None:
+                # "feed_forward_chunk_size" can be used to save memory
+                ff_output = _chunked_feed_forward(self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size)
+            else:
+                ff_output = self.ff(norm_hidden_states)
+
+            hidden_states = ff_output + hidden_states
+            if hidden_states.ndim == 4:
+                hidden_states = hidden_states.squeeze(1)
+
+            return hidden_states
+
         if self.fusion_blocks == "midup":
             attn_modules = torch_attn_dfs(self.unet.mid_block) + torch_attn_dfs(self.unet.up_blocks)
-        elif self.fusion_blocks == "full":
+        elif self.fusion_blocks in ["full", "down_flip"]:
             attn_modules = torch_attn_dfs(self.unet)
 
         for i, (name, module) in enumerate(attn_modules):
             module._original_inner_forward = module.forward
-            module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
+            if self.hack_type == "vip":
+                module.forward = hacked_vip_basic_transformer_inner_forward.__get__(module, VIPBasicTransformerBlock)
+            else:
+                module.forward = hacked_basic_transformer_inner_forward.__get__(module, BasicTransformerBlock)
             module.bank = None
 
     def update(self, referencenet, dtype=torch.float32):
@@ -186,6 +250,24 @@ class ReferenceAttentionControl(object):
         elif self.fusion_blocks == "full":
             reader_attn_modules = torch_attn_dfs(self.unet)
             writer_attn_modules = torch_attn_dfs(referencenet)
+        elif self.fusion_blocks == "down_flip":
+            reader_down_modules = torch_attn_dfs(self.unet.down_blocks)
+            reader_mid_modules = torch_attn_dfs(self.unet.mid_block)
+            reader_up_modules = torch_attn_dfs(self.unet.up_blocks)
+
+            writer_down_modules = torch_attn_dfs(referencenet.down_blocks)
+            writer_mid_modules = torch_attn_dfs(referencenet.mid_block)
+            # down
+            for (_, r), (_, w) in zip(reader_down_modules, writer_down_modules):
+                r.bank = w.bank.to(dtype)
+            # mid
+            for (_, r), (_, w) in zip(reader_mid_modules, writer_mid_modules):
+                r.bank = w.bank.to(dtype)
+            # up
+            for (_, r), (_, w) in zip(reader_up_modules, writer_down_modules[::-1]):
+                r.bank = w.bank.to(dtype)
+
+            return
 
         for (_, r), (_, w) in zip(reader_attn_modules, writer_attn_modules):
             r.bank = w.bank.to(dtype)
@@ -193,7 +275,7 @@ class ReferenceAttentionControl(object):
     def clear(self):
         if self.fusion_blocks == "midup":
             attn_modules = torch_attn_dfs(self.unet.mid_block) + torch_attn_dfs(self.unet.up_blocks)
-        elif self.fusion_blocks == "full":
+        elif self.fusion_blocks in ["full", "down_flip"]:
             attn_modules = torch_attn_dfs(self.unet)
 
         for name, module in attn_modules:
