@@ -36,7 +36,7 @@ from ...schedulers import (
 from ...utils import USE_PEFT_BACKEND, BaseOutput, logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
-from diffusers.models.unet_motion_model import MotionAdapter
+from diffusers.models.unets.unet_motion_model import MotionAdapter
 from diffusers.models.reference_attention import ReferenceAttentionControl
 from diffusers.models.referencenet import ReferenceNetModel
 

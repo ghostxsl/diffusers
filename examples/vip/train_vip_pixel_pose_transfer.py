@@ -115,7 +115,7 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=str,
-        default="768x576",
+        default="1024x768",
         help=(
             "The resolution(h x w) for input images, all the images in the train"
             " dataset will be resized to this resolution"
@@ -172,7 +172,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=1e-5,
+        default=4e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -184,7 +184,7 @@ def parse_args():
     parser.add_argument(
         "--lr_scheduler",
         type=str,
-        default="constant_with_warmup",
+        default="constant",
         help=(
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
@@ -385,6 +385,9 @@ def main(args):
             timestep_spacing="trailing",
             rescale_betas_zero_snr=True,
         )
+        block_out_channels = (96, 192, 256, 512, 1024, 1024)
+        layers_per_block = (1, 1, 2, 2, 2, 2)
+        attention_head_dim = (0, 0, 8, 16, 32, 32)
         # Load UNet
         if args.unet_model_path:
             logger.info("Loading existing unet weights")
@@ -392,9 +395,9 @@ def main(args):
         else:
             unet = VIPUNet2DConditionModel(
                 sample_size=args.resolution,
-                block_out_channels=(192, 384, 768, 768),
-                layers_per_block=(1, 1, 2, 2),
-                attention_head_dim=(0, 12, 24, 24),
+                block_out_channels=block_out_channels,
+                layers_per_block=layers_per_block,
+                attention_head_dim=attention_head_dim,
                 cross_attention_dim=None,
                 use_cond_embed=True,
                 use_kv_compression=False,
@@ -406,9 +409,9 @@ def main(args):
         else:
             referencenet = ReferenceTextureModel(
                 sample_size=args.resolution,
-                block_out_channels=(192, 384, 768, 768),
-                layers_per_block=(1, 1, 2, 2),
-                attention_head_dim=(0, 12, 24, 24),
+                block_out_channels=block_out_channels,
+                layers_per_block=layers_per_block,
+                attention_head_dim=attention_head_dim,
                 cross_attention_dim=None,
                 use_kv_compression=True,
                 compression_ratio=2,
@@ -493,7 +496,7 @@ def main(args):
     )
 
     reference_control_reader = ReferenceAttentionControl(
-        unet, fusion_blocks='down_flip', hack_type='vip')
+        unet, fusion_blocks='full', hack_type='vip')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
