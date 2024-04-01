@@ -1,0 +1,5 @@
+from .vip_animate_image import VIPAnimateImagePipeline
+from .vip_animate_video import VIPAnimateVideoPipeline
+from .vip_image_variation import VIPImageVariationPipeline
+from .vip_pose_transfer import VIPPoseTransferPipeline
+from .vip_pixel_pose_transfer import VIPPixelPoseTransferPipeline

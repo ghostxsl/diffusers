@@ -21,6 +21,7 @@ from diffusers.utils.prompt_parser import load_webui_textual_inversion
 
 from diffusers.utils.vip_utils import *
 from diffusers.data.utils import *
+from diffusers.data.vos_client import VOSClient
 
 from aistudio.utils.loader import ROOT_DIR
 from aistudio.extensions.HumanPose import HumanPose
@@ -42,6 +43,11 @@ def parse_args():
         default=None,
         type=str,
         help="Directory to reference image.")
+    parser.add_argument(
+        "--vos_pkl",
+        default=None,
+        type=str,
+        help="Path to image list on vos.")
 
     parser.add_argument(
         "--pose_dir",
@@ -83,6 +89,16 @@ def parse_args():
         default=False,
         action="store_true",
         help="")
+
+    parser.add_argument(
+        "--rank",
+        default=None,
+        type=int)
+    parser.add_argument(
+        "--num_ranks",
+        default=None,
+        type=int)
+
     parser.add_argument(
         "--restore_model_path",
         default="/apps/dat/cv/xsl/weights/majicMIX-realistic-7",
@@ -321,34 +337,38 @@ class PoseTransfer(object):
 
         return ref_img
 
-    def compound_image(self, gen_imgs, ref_img, crop_bbox, pad_border):
+    def compound_image(self, gen_imgs, gen_imgs_pose, ref_img, crop_bbox, pad_border):
+        # 获取lama背景图
         ref_mask = self.matting_infer(ref_img)
         if np.sum(ref_mask) == 0:
             return None
-
         lama_img, _, _ = self.lama_infer(ref_img, ref_mask)
-        out_imgs = []
-        for j, res_img in enumerate(gen_imgs):
-            cw, ch = crop_bbox[2] - crop_bbox[0], crop_bbox[3] - crop_bbox[1]
+
+        cw, ch = crop_bbox[2] - crop_bbox[0], crop_bbox[3] - crop_bbox[1]
+
+        def affine_crop(img, cw, ch):
+            # 仿射变换回到原始crop尺寸
             if pad_border is None or (sum(pad_border[0]) == 0 and sum(pad_border[1]) == 0):
                 pass
             else:
                 if sum(pad_border[0]) != 0:
-                    res_img = res_img.resize((cw, ch + sum(pad_border[0])), 1)
+                    img = img.resize((cw, ch + sum(pad_border[0])), 1)
                     y1 = pad_border[0][0]
-                    res_img = np.array(res_img)[y1: ch + y1]
+                    img = np.array(img)[y1: ch + y1]
                 elif sum(pad_border[1]) != 0:
-                    res_img = res_img.resize((cw + sum(pad_border[1]), ch), 1)
+                    img = img.resize((cw + sum(pad_border[1]), ch), 1)
                     x1 = pad_border[1][0]
-                    res_img = np.array(res_img)[:, x1: cw + x1]
+                    img = np.array(img)[:, x1: cw + x1]
                 else:
                     raise Exception('error pad_border!')
-                res_img = Image.fromarray(res_img)
+                img = Image.fromarray(img)
 
-            res_img = res_img.resize((cw, ch), 1)
+            return img.resize((cw, ch), 1)
+
+        # 将生成图放回原图位置
+        out_imgs = [affine_crop(im, cw, ch) for im in gen_imgs]
+        for i, res_img in enumerate(out_imgs):
             label_matting = self.matting_infer(res_img)
-            if np.sum(label_matting) == 0:
-                return None
 
             label_matting = label_matting[..., None].astype('float32') / 255.0
             res_img = np.array(res_img).astype('float32')
@@ -359,35 +379,27 @@ class PoseTransfer(object):
             crop_bg = np.clip(crop_bg, 0, 255).astype('uint8')
             temp_img[crop_bbox[1]: crop_bbox[3], crop_bbox[0]: crop_bbox[2]] = crop_bg
 
-            out_imgs.append(Image.fromarray(temp_img))
+            out_imgs[i] = Image.fromarray(temp_img)
 
-        return out_imgs
+        # 将pose图放回原图位置
+        ref_pose = Image.new("RGB", ref_img.size, 0)
+        out_pose = [affine_crop(im, cw, ch) for im in gen_imgs_pose]
+        for i, pose_img in enumerate(out_pose):
+            temp_pose = ref_pose.copy()
+            temp_pose = np.array(temp_pose)
+            temp_pose[crop_bbox[1]: crop_bbox[3], crop_bbox[0]: crop_bbox[2]] = np.array(pose_img)
 
-    def restore_image(self, images, pose_images, img_size=(1024, 1024)):
-        out_imgs = []
-        mask_image = Image.new("RGB", img_size, (255, 255, 255))
-        for img, pose_img in zip(images, pose_images):
-            pad_img, pad_border = self.pad_image(img)
-            seed = get_fixed_seed(-1)
-            generator = get_torch_generator(seed, device=self.device)
-            inter_imgs, image_overlay = self.restore_pipe(
-                image=pad_img,
-                mask_image=mask_image,
-                prompt="4k, high-res, masterpiece, best quality, sharp focus, (cinematic lighting), soft lighting, dynamic angle",
-                negative_prompt="ng_deepnegative_v1_75t, (nsfw:2), (naked:2), (greyscale:1.2), paintings, sketches, (worst quality:2), (low quality:2), (normal quality:2), lowres, normal quality, ((monochrome)), ((grayscale)), acnes, age spot, glans",
-                control_image=pose_img,
-                height=img_size[0],
-                width=img_size[1],
-                strength=0.4,
-                num_inference_steps=30,
-                guidance_scale=3.0,
-                num_images_per_prompt=1,
-                generator=generator,
-                controlnet_conditioning_scale=1.0,
-            )
-            inter_imgs = alpha_composite(inter_imgs, image_overlay)
-            restore_img = self.codeformer(inter_imgs)[0]
+            out_pose[i] = Image.fromarray(temp_pose)
 
+        return out_imgs, out_pose
+
+    def restore_image(self,
+                      images,
+                      pose_images,
+                      gender="person",
+                      img_size=(1024, 1024)):
+
+        def remove_border(restore_img, pad_border=None):
             if pad_border is not None:
                 restore_img = np.array(restore_img)
                 if sum(pad_border[0]) != 0:
@@ -397,8 +409,36 @@ class PoseTransfer(object):
                 elif sum(pad_border[1]) != 0:
                     x1 = pad_border[1][0]
                     x2 = -pad_border[1][1] if pad_border[1][1] != 0 else restore_img.shape[1]
-                    restore_img = restore_img[x1:x2]
+                    restore_img = restore_img[:, x1:x2]
                 restore_img = Image.fromarray(restore_img)
+            return restore_img
+
+        out_imgs = []
+        mask_image = Image.new("RGB", img_size, (255, 255, 255))
+        for img, pose_img in zip(images, pose_images):
+            pad_img, pad_border = self.pad_image(img)
+            pad_pose_img, _ = self.pad_image(pose_img, pad_values=0)
+            seed = get_fixed_seed(-1)
+            generator = get_torch_generator(seed, device=self.device)
+            inter_imgs, image_overlay = self.restore_pipe(
+                image=pad_img,
+                mask_image=mask_image,
+                prompt=f"{gender} posing for a photo, 4k, high-res, masterpiece, best quality, sharp focus, (cinematic lighting), soft lighting, dynamic angle",
+                negative_prompt="ng_deepnegative_v1_75t, (nsfw:2), (naked:2), (greyscale:1.2), paintings, sketches, (worst quality:2), (low quality:2), (normal quality:2), lowres, normal quality, ((monochrome)), ((grayscale)), acnes, age spot, glans",
+                control_image=pad_pose_img,
+                height=img_size[0],
+                width=img_size[1],
+                strength=0.4,
+                num_inference_steps=30,
+                guidance_scale=2.5,
+                num_images_per_prompt=1,
+                generator=generator,
+                controlnet_conditioning_scale=1.0,
+            )
+            inter_imgs = alpha_composite(inter_imgs, image_overlay)
+            restore_img = self.codeformer(inter_imgs)[0]
+
+            restore_img = remove_border(restore_img, pad_border)
             out_imgs.append(restore_img.resize(img.size, 1))
         return out_imgs
 
@@ -425,9 +465,9 @@ class PoseTransfer(object):
                     temp_ind.append(topk_ind[ii])
                     temp_val.append(sroted_oks[ii])
                     ii += 1
-                if self.topk_thr >= l:
+                if self.topk_thr >= l and len(temp_ind) > 0:
                     ind = random.choice(temp_ind)
-                    out_ind.append(ind)
+                    out_ind.append(int(ind))
                     out_val.append(oks[ind])
         else:
             while oks[topk_ind[0]] > self.topk_thr:
@@ -452,10 +492,10 @@ class PoseTransfer(object):
 
         out_pose_img = []
         for ind, pose_similarity in zip(topk_ind, topk_oks):
-            pose = self.pose_lib['dts'][ind]
+            pose = self.pose_lib[pose_label][ind]
             out_pose_img.append(self.draw_pose(pose[None], self.infer_size))
 
-        return out_pose_img, src_pose_img
+        return out_pose_img, src_pose_img, (topk_ind, topk_oks)
 
     def __call__(self, image, topk=1, pose_label="dts", **kwargs):
         # 推理pose
@@ -464,7 +504,7 @@ class PoseTransfer(object):
             return None, None
 
         # topk相似pose
-        topk_pose_img, src_pose_img = self.topk_pose(pose, topk, pose_label)
+        topk_pose_img, src_pose_img, topk_info = self.topk_pose(pose, topk, pose_label)
 
         out_img = []
         generator = get_torch_generator(get_fixed_seed(-1), device=self.device)
@@ -481,7 +521,7 @@ class PoseTransfer(object):
             )[0]
             out_img.append(res_img)
         topk_pose_img.insert(0, src_pose_img)
-        return out_img, topk_pose_img
+        return out_img, topk_pose_img, topk_info
 
 
 def get_img_path_list(img_file=None, img_dir=None):
@@ -504,6 +544,16 @@ def get_img_path_list(img_file=None, img_dir=None):
     return img_path_list
 
 
+def read_image(args, file_path):
+    if args.vos_pkl is None:
+        img = load_image(file_path)
+    else:
+        img = args.vos_client.download_vos_pil(file_path)
+        img = load_image(img)
+
+    return img
+
+
 def main(args):
     gender_map = {
         "男性": "man",
@@ -515,16 +565,45 @@ def main(args):
         "boy": "boy",
         "girl": "girl",
     }
+    race_map = {
+        "亚洲": "asian",
+        "欧洲": "european",
+        "欧美": "european",
+        "asian": "asian",
+        "european": "european",
+    }
 
     pose_trans = PoseTransfer(args)
-    ref_img_list = get_img_path_list(args.ref_img, args.ref_dir)
+    if args.vos_pkl is None:
+        img_list = get_img_path_list(args.ref_img, args.ref_dir)
+    else:
+        img_list = load_file(args.vos_pkl)
+        args.vos_client = VOSClient()
 
-    for i, file in enumerate(ref_img_list):
+    if args.rank is not None and args.num_ranks is not None:
+        assert args.rank < args.num_ranks
+        total_num = len(img_list)
+        stride = int(total_num / args.num_ranks)
+
+        start_idx = stride * args.rank
+        end_idx = stride * (args.rank + 1) if args.rank + 1 < args.num_ranks else len(img_list)
+        # TODO: Clean here
+        img_keys = sorted(img_list.keys())
+        img_keys = img_keys[start_idx: end_idx]
+        img_list = [img_list[k] for k in img_keys]
+
+    for i, file in enumerate(img_list):
         try:
             t1 = time.time()
+            # TODO: Clean here
+            if args.vos_pkl is not None:
+                race = file.get("人种", "亚洲")
+                race = race_map.get(race, "asian")
+                file = file["vos路径"]
+
             print(f"{i + 1}: {file}")
             name = basename(file)
-            ref_img = load_image(file)
+            ref_img = read_image(args, file)
             crop_img, crop_bbox, pad_border = pose_trans.crop_image(ref_img)
             if crop_img is None:
                 print(f"Error1: input image no pose: {file}")
@@ -537,18 +616,23 @@ def main(args):
 
             pose_label = name.split('_')[0]
             pose_label = "dts" if pose_label not in gender_map else gender_map[pose_label]
-            res, dis_pose = pose_trans(matting_img, topk=args.topk, pose_label=pose_label)
+            res, dis_pose, topk_info = pose_trans(
+                matting_img, topk=args.topk, pose_label=pose_label)
             if res is None:
                 print(f"Error3: matting image no pose: {file}")
                 continue
 
-            out_imgs = pose_trans.compound_image(res, ref_img, crop_bbox, pad_border)
+            out_imgs, dis_pose = pose_trans.compound_image(
+                res, dis_pose, ref_img, crop_bbox, pad_border)
             if out_imgs is None:
                 print(f"Error4: compound image no matting: {file}")
                 out_imgs = [a.resize(ref_img.size, 1) for a in res]
 
             if args.restore:
-                restore_imgs = pose_trans.restore_image(out_imgs, dis_pose[1:])
+                gender = pose_label if pose_label in gender_map else "person"
+                if args.vos_pkl is not None:
+                    gender = race + " " + gender
+                restore_imgs = pose_trans.restore_image(out_imgs, dis_pose[1:], gender)
 
             if args.display:
                 out_imgs = np.concatenate([ref_img, ] + out_imgs, axis=1)
@@ -559,10 +643,12 @@ def main(args):
                     out_imgs = np.concatenate([out_imgs, restore_imgs, dis_pose])
                 else:
                     out_imgs = np.concatenate([out_imgs, dis_pose])
-                Image.fromarray(out_imgs).save(join(args.out_dir, name))
+                Image.fromarray(out_imgs).save(join(args.out_dir, splitext(name)[0] + '.jpg'))
             else:
-                for j, im in enumerate(out_imgs):
-                    im.save(join(args.out_dir, splitext(name)[0] + f'_{j}.jpg'))
+                for j, (im, ind_, oks_) in enumerate(zip(out_imgs, topk_info[0], topk_info[1])):
+                    out_im = np.concatenate([ref_img, im], axis=1)
+                    Image.fromarray(out_im).save(
+                        join(args.out_dir, splitext(name)[0] + f'_{ind_}_{round(oks_, 2)}_{j}.jpg'))
             t2 = time.time()
             print(f"time: {t2 - t1}s")
         except Exception as e:
