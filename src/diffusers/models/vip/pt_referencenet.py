@@ -41,6 +41,7 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.unets.unet_2d_blocks import (
     get_down_block,
     get_mid_block,
+    get_up_block,
 )
 
 
@@ -71,23 +72,32 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
         flip_sin_to_cos: bool = True,
         freq_shift: int = 0,
         down_block_types: Tuple[str] = (
+            "DownBlock2D",
+            "DownBlock2D",
             "VIPCrossAttnDownBlock2D",
             "VIPCrossAttnDownBlock2D",
             "VIPCrossAttnDownBlock2D",
             "DownBlock2D",
         ),
         mid_block_type: Optional[str] = "VIPUNetMidBlock2DCrossAttn",
-        only_cross_attention: Union[bool, Tuple[bool]] = False,
-        block_out_channels: Tuple[int] = (192, 384, 768, 768),
-        layers_per_block: Union[int, Tuple[int]] = 2,
+        up_block_types: Tuple[str] = (
+                "UpBlock2D",
+                "VIPCrossAttnUpBlock2D",
+                "VIPCrossAttnUpBlock2D",
+                "VIPCrossAttnUpBlock2D",
+                "UpBlock2D",
+                "UpBlock2D"
+        ),
+        block_out_channels: Tuple[int] = (64, 128, 256, 512, 1024, 1024),
+        layers_per_block: Union[int, Tuple[int]] = (1, 1, 1, 2, 2, 1),
+        cross_attention_dim: Optional[int] = None,
+        attention_head_dim: Union[int, Tuple[int]] = (0, 0, 8, 16, 32, 32),
+        num_attention_heads: Optional[Union[int, Tuple[int]]] = None,
         dropout: float = 0.0,
         act_fn: str = "silu",
         norm_num_groups: Optional[int] = 32,
         norm_eps: float = 1e-5,
-        cross_attention_dim: Optional[int] = 1280,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
-        attention_head_dim: Union[int, Tuple[int]] = 8,
-        num_attention_heads: Optional[Union[int, Tuple[int]]] = None,
         class_embed_type: Optional[str] = None,
         num_class_embeds: Optional[int] = None,
         resnet_time_scale_shift: str = "default",
@@ -101,8 +111,6 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
         projection_class_embeddings_input_dim: Optional[int] = None,
         attention_type: str = "default",
         class_embeddings_concat: bool = False,
-        mid_block_only_cross_attention: Optional[bool] = None,
-        cross_attention_norm: Optional[str] = None,
         use_kv_compression: bool = True,
         compression_ratio: int = 2,
     ):
@@ -193,15 +201,7 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
             self.time_embed_act = get_activation(time_embedding_act_fn)
 
         self.down_blocks = nn.ModuleList([])
-
-        if isinstance(only_cross_attention, bool):
-            if mid_block_only_cross_attention is None:
-                mid_block_only_cross_attention = only_cross_attention
-
-            only_cross_attention = [only_cross_attention] * len(down_block_types)
-
-        if mid_block_only_cross_attention is None:
-            mid_block_only_cross_attention = False
+        self.up_blocks = nn.ModuleList([])
 
         if isinstance(num_attention_heads, int):
             num_attention_heads = (num_attention_heads,) * len(down_block_types)
@@ -247,12 +247,10 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
                 cross_attention_dim=cross_attention_dim[i],
                 num_attention_heads=num_attention_heads[i],
                 downsample_padding=1,
-                only_cross_attention=only_cross_attention[i],
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 attention_type=attention_type,
                 resnet_skip_time_act=resnet_skip_time_act,
                 resnet_out_scale_factor=resnet_out_scale_factor,
-                cross_attention_norm=cross_attention_norm,
                 attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
                 dropout=dropout,
                 use_kv_compression=use_kv_compression,
@@ -278,20 +276,80 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
             resnet_groups=norm_num_groups,
             num_attention_heads=num_attention_heads[-1],
             cross_attention_dim=cross_attention_dim[-1],
-            mid_block_only_cross_attention=mid_block_only_cross_attention,
             attention_type=attention_type,
             resnet_skip_time_act=resnet_skip_time_act,
-            cross_attention_norm=cross_attention_norm,
             attention_head_dim=attention_head_dim[-1],
-            use_kv_compression=use_kv_compression,
+            use_kv_compression=False,
             compression_ratio=compression_ratio,
         )
         if self.mid_block is not None and hasattr(self.mid_block, 'attentions'):
-            self.mid_block.resnets[1] = Identity()
             for attn_module in self.mid_block.attentions:
                     attn_module.transformer_blocks = nn.ModuleList(
                         [InnerAttnIdentity() for _ in attn_module.transformer_blocks])
-                    attn_module.proj_out = nn.Identity()
+
+        # count how many layers upsample the images
+        self.num_upsamplers = 0
+
+        # up
+        reversed_block_out_channels = list(reversed(block_out_channels))
+        reversed_num_attention_heads = list(reversed(num_attention_heads))
+        reversed_layers_per_block = list(reversed(layers_per_block))
+        reversed_cross_attention_dim = list(reversed(cross_attention_dim))
+        reversed_transformer_layers_per_block = list(reversed(transformer_layers_per_block))
+
+        output_channel = reversed_block_out_channels[0]
+        for i, up_block_type in enumerate(up_block_types):
+            if reversed_num_attention_heads[i] == 0:
+                continue
+
+            is_final_block = i == len(block_out_channels) - 1
+
+            prev_output_channel = output_channel
+            output_channel = reversed_block_out_channels[i]
+            input_channel = reversed_block_out_channels[min(i + 1, len(block_out_channels) - 1)]
+
+            # add upsample block for all BUT final layer
+            if not is_final_block:
+                add_upsample = True
+                self.num_upsamplers += 1
+            else:
+                add_upsample = False
+
+            up_block = get_up_block(
+                up_block_type,
+                num_layers=reversed_layers_per_block[i] + 1,
+                transformer_layers_per_block=reversed_transformer_layers_per_block[i],
+                in_channels=input_channel,
+                out_channels=output_channel,
+                prev_output_channel=prev_output_channel,
+                temb_channels=blocks_time_embed_dim,
+                add_upsample=add_upsample,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                resolution_idx=i,
+                resnet_groups=norm_num_groups,
+                cross_attention_dim=reversed_cross_attention_dim[i],
+                num_attention_heads=reversed_num_attention_heads[i],
+                resnet_time_scale_shift=resnet_time_scale_shift,
+                attention_type=attention_type,
+                resnet_skip_time_act=resnet_skip_time_act,
+                resnet_out_scale_factor=resnet_out_scale_factor,
+                attention_head_dim=attention_head_dim[i] if attention_head_dim[i] is not None else output_channel,
+                dropout=dropout,
+                use_kv_compression=use_kv_compression,
+                compression_ratio=compression_ratio,
+            )
+            if hasattr(up_block, 'attentions'):
+                for attn_module in up_block.attentions:
+                    if hasattr(attn_module, 'transformer_blocks'):
+                        attn_module.transformer_blocks = nn.ModuleList(
+                            [InnerAttnIdentity() for _ in attn_module.transformer_blocks])
+            self.up_blocks.append(up_block)
+            prev_output_channel = output_channel
+
+        self.up_blocks[-1].upsamplers = None
+        if hasattr(self.up_blocks[-1], 'attentions'):
+            self.up_blocks[-1].attentions[-1].proj_out = nn.Identity()
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -514,6 +572,18 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
         return_dict: bool = True,
         **kwargs,
     ) -> Union[UNet2DConditionOutput, Tuple]:
+
+        default_overall_up_factor = 2**self.num_upsamplers
+        # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`
+        forward_upsample_size = False
+        upsample_size = None
+
+        for dim in sample.shape[-2:]:
+            if dim % default_overall_up_factor != 0:
+                # Forward upsample size to force interpolation output size.
+                forward_upsample_size = True
+                break
+
         # 1. time
         timesteps = timestep
         if not torch.is_tensor(timesteps):
@@ -574,6 +644,26 @@ class ReferenceTextureModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin
         if self.mid_block is not None:
             sample = self.mid_block(hidden_states=sample, temb=emb)
 
+        # 5. up
+        for i, upsample_block in enumerate(self.up_blocks):
+            is_final_block = i == len(self.up_blocks) - 1
+
+            res_samples = down_block_res_samples[-len(upsample_block.resnets):]
+            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+
+            # if we have not reached the final block and need to forward the
+            # upsample size, we do it here
+            if not is_final_block and forward_upsample_size:
+                upsample_size = down_block_res_samples[-1].shape[2:]
+
+            sample = upsample_block(
+                hidden_states=sample,
+                temb=emb,
+                res_hidden_states_tuple=res_samples,
+                upsample_size=upsample_size,
+            )
+
+
         if not return_dict:
             return (sample,)
 
@@ -590,7 +680,7 @@ class InnerAttnIdentity(nn.Module):
                 compress_hidden_states: Optional[torch.FloatTensor] = None,
                 *args,
                 **kwargs):
-        self.bank = compress_hidden_states
+        self.bank = compress_hidden_states if compress_hidden_states is not None else input
         return input
 
 

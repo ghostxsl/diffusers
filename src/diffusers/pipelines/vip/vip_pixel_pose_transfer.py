@@ -18,13 +18,12 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from torchvision.transforms import ToTensor, Normalize
+from torchvision.transforms import Compose, ToTensor, Normalize
 from PIL import Image
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...image_processor import VaeImageProcessor
 from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin, IPAdapterMixin
-from ...models import AutoencoderKL, UNet2DConditionModel, ControlNetModel
+from diffusers.models.vip import VIPUNet2DConditionModel
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -37,7 +36,7 @@ from ...utils import USE_PEFT_BACKEND, logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from diffusers.models.reference_attention import ReferenceAttentionControl
-from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.vip import ReferenceTextureModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -59,13 +58,12 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
-    model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
+class VIPPixelPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
+    model_cpu_offload_seq = "unet->referencenet"
 
     def __init__(
         self,
-        vae: AutoencoderKL,
-        unet: UNet2DConditionModel,
+        unet: VIPUNet2DConditionModel,
         scheduler: Union[
             DDIMScheduler,
             PNDMScheduler,
@@ -74,111 +72,28 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
             EulerAncestralDiscreteScheduler,
             DPMSolverMultistepScheduler,
         ],
-        feature_extractor: CLIPImageProcessor,
-        image_encoder: CLIPVisionModelWithProjection,
-        controlnet: ControlNetModel,
-        referencenet: ReferenceNetModel,
+        referencenet: ReferenceTextureModel,
     ):
         super().__init__()
 
         self.register_modules(
-            vae=vae,
             unet=unet,
             scheduler=scheduler,
-            feature_extractor=feature_extractor,
-            image_encoder=image_encoder,
-            controlnet=controlnet,
             referencenet=referencenet,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.control_image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
+            do_convert_rgb=True, do_normalize=False
         )
 
-        self.reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
+        self.reference_control_reader = ReferenceAttentionControl(
+            self.unet, fusion_blocks='full', hack_type='vip')
 
-    def encode_image(self, image, device, num_images_per_prompt, do_classifier_free_guidance=False):
-        dtype = next(self.image_encoder.parameters()).dtype
-        uncond_image_embeds = None
-
-        if do_classifier_free_guidance:
-            uncond_image = Image.new("RGB", image.size)
-
-        image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
-
-        image = image.to(device=device, dtype=dtype)
-        image_embeds = self.image_encoder(image).image_embeds
-        image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0).unsqueeze(1)
-
-        if do_classifier_free_guidance:
-            uncond_image = self.feature_extractor(images=uncond_image, return_tensors="pt").pixel_values
-            uncond_image = uncond_image.to(device=device, dtype=dtype)
-            uncond_image_embeds = self.image_encoder(uncond_image).image_embeds
-            uncond_image_embeds = uncond_image_embeds.repeat_interleave(num_images_per_prompt, dim=0).unsqueeze(1)
-
-        return image_embeds, uncond_image_embeds
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
-    def enable_vae_slicing(self):
-        r"""
-        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
-        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
-        """
-        self.vae.enable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_slicing
-    def disable_vae_slicing(self):
-        r"""
-        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_slicing()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_tiling
-    def enable_vae_tiling(self):
-        r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
-        """
-        self.vae.enable_tiling()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_vae_tiling
-    def disable_vae_tiling(self):
-        r"""
-        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        self.vae.disable_tiling()
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_freeu
-    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
-        r"""Enables the FreeU mechanism as in https://arxiv.org/abs/2309.11497.
-
-        The suffixes after the scaling factors represent the stages where they are being applied.
-
-        Please refer to the [official repository](https://github.com/ChenyangSi/FreeU) for combinations of the values
-        that are known to work well for different pipelines such as Stable Diffusion v1, v2, and Stable Diffusion XL.
-
-        Args:
-            s1 (`float`):
-                Scaling factor for stage 1 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            s2 (`float`):
-                Scaling factor for stage 2 to attenuate the contributions of the skip features. This is done to
-                mitigate "oversmoothing effect" in the enhanced denoising process.
-            b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
-            b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
-        """
-        if not hasattr(self, "unet"):
-            raise ValueError("The pipeline must have `unet` for using FreeU.")
-        self.unet.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_freeu
-    def disable_freeu(self):
-        """Disables the FreeU mechanism if enabled."""
-        self.unet.disable_freeu()
+        self.normalize_image = Compose(
+            [
+                ToTensor(),
+                Normalize([0.5], [0.5], inplace=True),
+            ]
+        )
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_extra_step_kwargs
     def prepare_extra_step_kwargs(self, generator, eta):
@@ -258,8 +173,8 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         shape = (
             batch_size,
             num_channels_latents,
-            height // self.vae_scale_factor,
-            width // self.vae_scale_factor,
+            height,
+            width,
         )
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -272,21 +187,6 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # scale the initial noise by the standard deviation required by the scheduler
         latents = latents * self.scheduler.init_noise_sigma
         return latents
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint.StableDiffusionInpaintPipeline._encode_vae_image
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
-        if isinstance(generator, list):
-            image_latents = [
-                self.vae.encode(image[i: i + 1]).latent_dist.sample(generator=generator[i])
-                for i in range(image.shape[0])
-            ]
-            image_latents = torch.cat(image_latents, dim=0)
-        else:
-            image_latents = self.vae.encode(image).latent_dist.sample(generator=generator)
-
-        image_latents = self.vae.config.scaling_factor * image_latents
-
-        return image_latents
 
     # Copied from diffusers.pipelines.controlnet.pipeline_controlnet.StableDiffusionControlNetPipeline.prepare_image
     def prepare_control_image(
@@ -309,6 +209,19 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         return image
 
+    def decode_images(self, latents):
+        images = (latents / 2 + 0.5).clamp(0, 1)
+        images = images.cpu().permute(0, 2, 3, 1).float().numpy()
+
+        images = (images * 255).round().astype("uint8")
+        if images.shape[-1] == 1:
+            # special case for grayscale (single channel) images
+            pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
+        else:
+            pil_images = [Image.fromarray(image) for image in images]
+
+        return pil_images
+
     @torch.no_grad()
     def __call__(
         self,
@@ -320,14 +233,15 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         guidance_scale: float = 6.5,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
-        cond_scale: float = 1.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         output_type: Optional[str] = "pil",
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = {},
+        **kwargs,
     ):
         device = self._execution_device
+        dtype = self.unet.dtype
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
@@ -335,25 +249,12 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
 
         # 1. Prepare image embedding and reference latents
         reference_image = reference_image.resize((width, height), Image.LANCZOS)
-        image_embeds, uncond_image_embeds = self.encode_image(
-            reference_image,
-            device,
-            num_images_per_prompt,
-            do_classifier_free_guidance
-        )
-        if do_classifier_free_guidance:
-            image_embeds = torch.cat([uncond_image_embeds, image_embeds])
-        dtype = image_embeds.dtype
-        encoder_hidden_states = image_embeds
+        reference_image = self.normalize_image(reference_image).unsqueeze(0)
 
         if do_classifier_free_guidance:
-            uncond_image = Image.new("RGB", reference_image.size)
-        reference_image = Normalize([0.5], [0.5], inplace=True)(ToTensor()(reference_image)).unsqueeze(0).repeat_interleave(num_images_per_prompt, dim=0)
-        if do_classifier_free_guidance:
-            uncond_image = Normalize([0.5], [0.5], inplace=True)(ToTensor()(uncond_image)).unsqueeze(0).repeat_interleave(num_images_per_prompt, dim=0)
-
-        reference_image = torch.cat([uncond_image, reference_image]) if do_classifier_free_guidance else reference_image
-        reference_latents = self._encode_vae_image(reference_image.to(device, dtype=dtype), generator)
+            uncond_image = torch.zeros_like(reference_image)
+        reference_latents = torch.cat([uncond_image, reference_image]) if do_classifier_free_guidance else reference_image
+        reference_latents = reference_latents.to(device=device, dtype=dtype)
 
         # 2. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -393,17 +294,15 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                self.referencenet(reference_latents, t, encoder_hidden_states)
+                self.referencenet(reference_latents, t)
                 self.reference_control_reader.update(self.referencenet, dtype=dtype)
 
                 # predict the noise residual
-                noise_pred = self.controlnet(
-                    base_model=self.unet,
+                noise_pred = self.unet(
                     sample=latent_model_input,
                     timestep=t,
-                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_hidden_states=None,
                     controlnet_cond=control_image,
-                    conditioning_scale=cond_scale,
                     cross_attention_kwargs=cross_attention_kwargs,
                     return_dict=False,
                 )[0]
@@ -428,8 +327,6 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                 # # compute the previous noisy sample x_t -> x_t-1
                 # latents = self.scheduler.webui_step(pred_original_sample, t, latents, **extra_step_kwargs)
 
-                self.reference_control_reader.clear()
-
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
@@ -437,9 +334,7 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
                         callback(i, t, latents)
 
         # Post-processing
-        image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
-        do_denormalize = [True] * image.shape[0]
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        images = self.decode_images(latents)
 
         # remove cache variables
         if getattr(self.scheduler, 'pred_ori_sample_prev', None) is not None:
@@ -448,4 +343,4 @@ class VIPPoseTransferPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lo
         # Offload all models
         self.maybe_free_model_hooks()
 
-        return image
+        return images

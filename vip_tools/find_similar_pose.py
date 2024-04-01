@@ -3,6 +3,7 @@ import os
 from os.path import join, exists, splitext, basename
 import argparse
 import time
+import random
 from tqdm import tqdm
 import torch
 import numpy as np
@@ -28,6 +29,7 @@ def parse_args():
         default=None,
         type=str,
         help="Directory to reference image.")
+
     parser.add_argument(
         "--pose_dir",
         default=None,
@@ -52,6 +54,11 @@ def parse_args():
     parser.add_argument(
         "--topk_thr",
         default=0.9,
+        type=float,
+        help="")
+    parser.add_argument(
+        "--topk_stride",
+        default=None,
         type=float,
         help="")
     parser.add_argument(
@@ -109,6 +116,7 @@ class FindSimilarPose(object):
     def __init__(self, args):
         self.args = args
         self.topk_thr = args.topk_thr
+        self.topk_stride = args.topk_stride
         self.infer_size = args.resolution
         self.weight_dir = args.weight_dir or join(ROOT_DIR, "weights")
         self.device = args.device
@@ -195,6 +203,35 @@ class FindSimilarPose(object):
         canvas = draw_bodypose(canvas, pose[..., :2], pose[..., 2] > kpt_thr)
         return Image.fromarray(canvas)
 
+    def topk_sampling(self, oks, topk=1):
+        topk_ind = np.argsort(-oks)
+        out_ind, out_val = [], []
+        if self.topk_stride is not None:
+            sroted_oks = oks[topk_ind]
+            stride_interval = np.linspace(1, -1, int(2 / self.topk_stride) + 1)
+
+            ii = 0
+            for h, l in zip(stride_interval[:-1], stride_interval[1:]):
+                if len(out_ind) == topk:
+                    break
+
+                temp_ind, temp_val = [], []
+                while sroted_oks[ii] >= l and sroted_oks[ii] < h:
+                    temp_ind.append(topk_ind[ii])
+                    temp_val.append(sroted_oks[ii])
+                    ii += 1
+                if self.topk_thr >= l and len(temp_ind) > 0:
+                    ind = random.choice(temp_ind)
+                    out_ind.append(ind)
+                    out_val.append(oks[ind])
+        else:
+            while oks[topk_ind[0]] > self.topk_thr:
+                topk_ind = np.delete(topk_ind, 0)
+            out_ind = [int(topk_ind[i]) for i in range(topk)]
+            out_val = [oks[i] for i in out_ind]
+
+        return out_ind, out_val
+
     def topk_pose(self, pose, topk=1, pose_label="dts"):
         w, h = pose['width'], pose['height']
         kpts = pose['body']['keypoints'][0:1] * np.array([w, h, 1.])
@@ -205,12 +242,11 @@ class FindSimilarPose(object):
         # 计算OKS相似度
         norm_pose_img = [self.draw_pose(norm_pose, self.infer_size)]
         oks = compute_OKS(norm_pose, bbox[None], self.pose_lib[pose_label])[0]
-        topk_ind = np.argsort(-oks)
-        while oks[topk_ind[0]] > self.topk_thr:
-            topk_ind = np.delete(topk_ind, 0)
 
-        for i in range(topk):
-            t_pose = self.pose_lib[pose_label][topk_ind[i]]
+        topk_ind, topk_oks = self.topk_sampling(oks, topk)
+
+        for ind, pose_similarity in zip(topk_ind, topk_oks):
+            t_pose = self.pose_lib[pose_label][ind]
             norm_pose_img.append(self.draw_pose(t_pose[None], self.infer_size))
 
             t_pose[..., :2] /= n_ratio
