@@ -39,7 +39,7 @@ from diffusers import (
     DDPMScheduler,
     UNet2DConditionModel,
 )
-from diffusers.models.embeddings import ImageProjection, IPAdapterPlusImageProjection
+from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr, cast_training_params
 from diffusers.utils.import_utils import is_xformers_available

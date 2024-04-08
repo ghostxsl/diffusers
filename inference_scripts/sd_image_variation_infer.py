@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--image_encoder_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/weights/sd-image-variations/image_encoder",
+        default="/apps/dat/cv/xsl/weights/IP-Adapter/image_encoder",
     )
 
     parser.add_argument(
