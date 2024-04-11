@@ -101,15 +101,17 @@ def process_gender_file(file_path):
     if file_path is None:
         return {}
 
+    file_path = [a.strip() for a in file_path.split(',') if len(a.strip()) > 0]
     out_dict = {}
-    if file_path.endswith(".csv"):
-        with open(file_path, 'r') as f:
-            reader = csv.reader(f)
-            for line in reader:
-                k = splitext(basename(line[0]))[0]
-                out_dict[k] = line[1]
-    else:
-        out_dict = load_file(file_path)
+    for file_ in file_path:
+        if file_.endswith(".csv"):
+            with open(file_, 'r') as f:
+                reader = csv.reader(f)
+                for line in reader:
+                    k = splitext(basename(line[0]))[0]
+                    out_dict[k] = line[1]
+        else:
+            out_dict = load_file(file_path)
 
     return out_dict
 

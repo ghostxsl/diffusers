@@ -18,6 +18,7 @@ from .unets.unet_3d_blocks import TransformerTemporalModel
 from .referencenet import AttnIdentity
 from .transformers.vip_transformer_2d import VIPBasicTransformerBlock
 from .vip.pt_referencenet import InnerAttnIdentity
+from .vip.sim_referencenet import SimAttnIdentity
 
 
 def torch_attn_dfs(model, prefix=""):
@@ -27,7 +28,7 @@ def torch_attn_dfs(model, prefix=""):
             continue
         elif isinstance(child, (BasicTransformerBlock, VIPBasicTransformerBlock)):
             result.append([prefix + f".{name}", child])
-        elif isinstance(child, (AttnIdentity, InnerAttnIdentity)):
+        elif isinstance(child, (AttnIdentity, InnerAttnIdentity, SimAttnIdentity)):
             result.append([prefix + f".{name}", child])
         else:
             result += torch_attn_dfs(child, prefix=prefix + f".{name}")
@@ -84,10 +85,7 @@ class ReferenceAttentionControl(object):
             if self.pos_embed is not None:
                 norm_hidden_states = self.pos_embed(norm_hidden_states)
 
-            # 1. Retrieve lora scale.
-            lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
-
-            # 2. Prepare GLIGEN inputs
+            # 1. Prepare GLIGEN inputs
             cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
             gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
 
@@ -110,11 +108,11 @@ class ReferenceAttentionControl(object):
             if hidden_states.ndim == 4:
                 hidden_states = hidden_states.squeeze(1)
 
-            # 2.5 GLIGEN Control
+            # 1.5 GLIGEN Control
             if gligen_kwargs is not None:
                 hidden_states = self.fuser(hidden_states, gligen_kwargs["objs"])
 
-            # 3. Cross-Attention
+            # 2. Cross-Attention
             if self.attn2 is not None:
                 if self.use_ada_layer_norm:
                     norm_hidden_states = self.norm2(hidden_states, timestep)
@@ -140,7 +138,7 @@ class ReferenceAttentionControl(object):
                 )
                 hidden_states = attn_output + hidden_states
 
-            # 4. Feed-forward
+            # 3. Feed-forward
             if self.use_ada_layer_norm_continuous:
                 norm_hidden_states = self.norm3(hidden_states, added_cond_kwargs["pooled_text_emb"])
             elif not self.use_ada_layer_norm_single:
@@ -156,10 +154,10 @@ class ReferenceAttentionControl(object):
             if self._chunk_size is not None:
                 # "feed_forward_chunk_size" can be used to save memory
                 ff_output = _chunked_feed_forward(
-                    self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size, lora_scale=lora_scale
+                    self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size
                 )
             else:
-                ff_output = self.ff(norm_hidden_states, scale=lora_scale)
+                ff_output = self.ff(norm_hidden_states)
 
             if self.use_ada_layer_norm_zero:
                 ff_output = gate_mlp.unsqueeze(1) * ff_output

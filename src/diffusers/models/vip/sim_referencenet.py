@@ -1,6 +1,4 @@
-# Copyright 2023 The HuggingFace Team. All rights reserved.
-# Copyright 2023 The VIP Inc. AIGC team. All rights reserved.
-# Modified from src/diffusers/models/unet_2d_condition.py
+# Copyright 2024 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,11 +18,11 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 
-from ..configuration_utils import ConfigMixin, register_to_config
-from ..loaders import UNet2DConditionLoadersMixin
-from ..utils import USE_PEFT_BACKEND, BaseOutput, deprecate, logging, scale_lora_layers, unscale_lora_layers
-from .activations import get_activation
-from .attention_processor import (
+from ...configuration_utils import ConfigMixin, register_to_config
+from ...loaders import PeftAdapterMixin, UNet2DConditionLoadersMixin
+from ...utils import BaseOutput, deprecate, logging, scale_lora_layers, unscale_lora_layers
+from ..activations import get_activation
+from ..attention_processor import (
     ADDED_KV_ATTENTION_PROCESSORS,
     CROSS_ATTENTION_PROCESSORS,
     Attention,
@@ -32,126 +30,44 @@ from .attention_processor import (
     AttnAddedKVProcessor,
     AttnProcessor,
 )
-from .embeddings import (
+from ..embeddings import (
     GaussianFourierProjection,
+    GLIGENTextBoundingboxProjection,
     ImageHintTimeEmbedding,
     ImageProjection,
     ImageTimeEmbedding,
-    GLIGENTextBoundingboxProjection,
     TextImageProjection,
     TextImageTimeEmbedding,
     TextTimeEmbedding,
     TimestepEmbedding,
     Timesteps,
+    IPAdapterPlusImageProjection,
 )
-from .modeling_utils import ModelMixin
-from .unets.unet_2d_blocks import (
-    UNetMidBlock2D,
-    UNetMidBlock2DCrossAttn,
-    UNetMidBlock2DSimpleCrossAttn,
+from ..modeling_utils import ModelMixin
+from diffusers.models.unets.unet_2d_blocks import (
     get_down_block,
+    get_mid_block,
     get_up_block,
 )
-from .transformers.transformer_2d import Transformer2DModelOutput
-from .vip.pt_referencenet import UNet2DConditionOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
-    r"""
-    A conditional 2D UNet model that takes a noisy sample, conditional state, and a timestep and returns a sample
-    shaped output.
-
-    This model inherits from [`ModelMixin`]. Check the superclass documentation for it's generic methods implemented
-    for all models (such as downloading or saving).
-
-    Parameters:
-        sample_size (`int` or `Tuple[int, int]`, *optional*, defaults to `None`):
-            Height and width of input/output sample.
-        in_channels (`int`, *optional*, defaults to 4): Number of channels in the input sample.
-        out_channels (`int`, *optional*, defaults to 4): Number of channels in the output.
-        center_input_sample (`bool`, *optional*, defaults to `False`): Whether to center the input sample.
-        flip_sin_to_cos (`bool`, *optional*, defaults to `False`):
-            Whether to flip the sin to cos in the time embedding.
-        freq_shift (`int`, *optional*, defaults to 0): The frequency shift to apply to the time embedding.
-        down_block_types (`Tuple[str]`, *optional*, defaults to `("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D")`):
-            The tuple of downsample blocks to use.
-        mid_block_type (`str`, *optional*, defaults to `"UNetMidBlock2DCrossAttn"`):
-            Block type for middle of UNet, it can be one of `UNetMidBlock2DCrossAttn`, `UNetMidBlock2D`, or
-            `UNetMidBlock2DSimpleCrossAttn`. If `None`, the mid block layer is skipped.
-        up_block_types (`Tuple[str]`, *optional*, defaults to `("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D")`):
-            The tuple of upsample blocks to use.
-        only_cross_attention(`bool` or `Tuple[bool]`, *optional*, default to `False`):
-            Whether to include self-attention in the basic transformer blocks, see
-            [`~models.attention.BasicTransformerBlock`].
-        block_out_channels (`Tuple[int]`, *optional*, defaults to `(320, 640, 1280, 1280)`):
-            The tuple of output channels for each block.
-        layers_per_block (`int`, *optional*, defaults to 2): The number of layers per block.
-        downsample_padding (`int`, *optional*, defaults to 1): The padding to use for the downsampling convolution.
-        mid_block_scale_factor (`float`, *optional*, defaults to 1.0): The scale factor to use for the mid block.
-        dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
-        act_fn (`str`, *optional*, defaults to `"silu"`): The activation function to use.
-        norm_num_groups (`int`, *optional*, defaults to 32): The number of groups to use for the normalization.
-            If `None`, normalization and activation layers is skipped in post-processing.
-        norm_eps (`float`, *optional*, defaults to 1e-5): The epsilon to use for the normalization.
-        cross_attention_dim (`int` or `Tuple[int]`, *optional*, defaults to 1280):
-            The dimension of the cross attention features.
-        transformer_layers_per_block (`int`, `Tuple[int]`, or `Tuple[Tuple]` , *optional*, defaults to 1):
-            The number of transformer blocks of type [`~models.attention.BasicTransformerBlock`]. Only relevant for
-            [`~models.unet_2d_blocks.CrossAttnDownBlock2D`], [`~models.unet_2d_blocks.CrossAttnUpBlock2D`],
-            [`~models.unet_2d_blocks.UNetMidBlock2DCrossAttn`].
-       reverse_transformer_layers_per_block : (`Tuple[Tuple]`, *optional*, defaults to None):
-            The number of transformer blocks of type [`~models.attention.BasicTransformerBlock`], in the upsampling
-            blocks of the U-Net. Only relevant if `transformer_layers_per_block` is of type `Tuple[Tuple]` and for
-            [`~models.unet_2d_blocks.CrossAttnDownBlock2D`], [`~models.unet_2d_blocks.CrossAttnUpBlock2D`],
-            [`~models.unet_2d_blocks.UNetMidBlock2DCrossAttn`].
-        encoder_hid_dim (`int`, *optional*, defaults to None):
-            If `encoder_hid_dim_type` is defined, `encoder_hidden_states` will be projected from `encoder_hid_dim`
-            dimension to `cross_attention_dim`.
-        encoder_hid_dim_type (`str`, *optional*, defaults to `None`):
-            If given, the `encoder_hidden_states` and potentially other embeddings are down-projected to text
-            embeddings of dimension `cross_attention` according to `encoder_hid_dim_type`.
-        attention_head_dim (`int`, *optional*, defaults to 8): The dimension of the attention heads.
-        num_attention_heads (`int`, *optional*):
-            The number of attention heads. If not defined, defaults to `attention_head_dim`
-        resnet_time_scale_shift (`str`, *optional*, defaults to `"default"`): Time scale shift config
-            for ResNet blocks (see [`~models.resnet.ResnetBlock2D`]). Choose from `default` or `scale_shift`.
-        class_embed_type (`str`, *optional*, defaults to `None`):
-            The type of class embedding to use which is ultimately summed with the time embeddings. Choose from `None`,
-            `"timestep"`, `"identity"`, `"projection"`, or `"simple_projection"`.
-        addition_embed_type (`str`, *optional*, defaults to `None`):
-            Configures an optional embedding which will be summed with the time embeddings. Choose from `None` or
-            "text". "text" will use the `TextTimeEmbedding` layer.
-        addition_time_embed_dim: (`int`, *optional*, defaults to `None`):
-            Dimension for the timestep embeddings.
-        num_class_embeds (`int`, *optional*, defaults to `None`):
-            Input dimension of the learnable embedding matrix to be projected to `time_embed_dim`, when performing
-            class conditioning with `class_embed_type` equal to `None`.
-        time_embedding_type (`str`, *optional*, defaults to `positional`):
-            The type of position embedding to use for timesteps. Choose from `positional` or `fourier`.
-        time_embedding_dim (`int`, *optional*, defaults to `None`):
-            An optional override for the dimension of the projected time embedding.
-        time_embedding_act_fn (`str`, *optional*, defaults to `None`):
-            Optional activation function to use only once on the time embeddings before they are passed to the rest of
-            the UNet. Choose from `silu`, `mish`, `gelu`, and `swish`.
-        timestep_post_act (`str`, *optional*, defaults to `None`):
-            The second activation function to use in timestep embedding. Choose from `silu`, `mish` and `gelu`.
-        time_cond_proj_dim (`int`, *optional*, defaults to `None`):
-            The dimension of `cond_proj` layer in the timestep embedding.
-        conv_in_kernel (`int`, *optional*, default to `3`): The kernel size of `conv_in` layer. conv_out_kernel (`int`,
-        *optional*, default to `3`): The kernel size of `conv_out` layer. projection_class_embeddings_input_dim (`int`,
-        *optional*): The dimension of the `class_labels` input when
-            `class_embed_type="projection"`. Required when `class_embed_type="projection"`.
-        class_embeddings_concat (`bool`, *optional*, defaults to `False`): Whether to concatenate the time
-            embeddings with the class embeddings.
-        mid_block_only_cross_attention (`bool`, *optional*, defaults to `None`):
-            Whether to use cross attention with the mid block when using the `UNetMidBlock2DSimpleCrossAttn`. If
-            `only_cross_attention` is given as a single boolean and `mid_block_only_cross_attention` is `None`, the
-            `only_cross_attention` value is used as the value for `mid_block_only_cross_attention`. Default to `False`
-            otherwise.
+@dataclass
+class UNet2DConditionOutput(BaseOutput):
     """
+    The output of [`UNet2DConditionModel`].
+
+    Args:
+        sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
+            The hidden states output conditioned on `encoder_hidden_states` input. Output of last layer of model.
+    """
+
+    sample: torch.FloatTensor = None
+
+
+class SimReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 
     _supports_gradient_checkpointing = True
 
@@ -169,28 +85,21 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             "DownBlock2D",
         ),
         mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
-        up_block_types: Tuple[str] = (
-                "UpBlock2D",
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D",
-                "CrossAttnUpBlock2D"
-        ),
-        only_cross_attention: Union[bool, Tuple[bool]] = False,
-        block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
+        up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
+        block_out_channels: Tuple[int] = (192, 384, 768, 768),
+        refer_out_channels: Tuple[int] = (320, 640, 1280, 1280),
         layers_per_block: Union[int, Tuple[int]] = 2,
+        downsample_padding: int = 1,
         dropout: float = 0.0,
         act_fn: str = "silu",
         norm_num_groups: Optional[int] = 32,
         norm_eps: float = 1e-5,
-        cross_attention_dim: Union[int, Tuple[int]] = 1280,
+        cross_attention_dim: Union[int, Tuple[int]] = 768,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
-        reverse_transformer_layers_per_block: Optional[Tuple[Tuple[int]]] = None,
         encoder_hid_dim: Optional[int] = None,
         encoder_hid_dim_type: Optional[str] = None,
         attention_head_dim: Union[int, Tuple[int]] = 8,
         num_attention_heads: Optional[Union[int, Tuple[int]]] = None,
-        dual_cross_attention: bool = False,
-        use_linear_projection: bool = False,
         class_embed_type: Optional[str] = None,
         addition_embed_type: Optional[str] = None,
         addition_time_embed_dim: Optional[int] = None,
@@ -198,18 +107,18 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         upcast_attention: bool = False,
         resnet_time_scale_shift: str = "default",
         resnet_skip_time_act: bool = False,
-        resnet_out_scale_factor: int = 1.0,
+        resnet_out_scale_factor: float = 1.0,
         time_embedding_type: str = "positional",
         time_embedding_dim: Optional[int] = None,
         time_embedding_act_fn: Optional[str] = None,
         timestep_post_act: Optional[str] = None,
         time_cond_proj_dim: Optional[int] = None,
+        conv_in_kernel: int = 3,
         projection_class_embeddings_input_dim: Optional[int] = None,
         attention_type: str = "default",
         class_embeddings_concat: bool = False,
-        mid_block_only_cross_attention: Optional[bool] = None,
         cross_attention_norm: Optional[str] = None,
-        addition_embed_type_num_heads=64,
+        addition_embed_type_num_heads: int = 64,
     ):
         super().__init__()
 
@@ -229,37 +138,31 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         num_attention_heads = num_attention_heads or attention_head_dim
 
         # Check inputs
-        if len(down_block_types) != len(up_block_types):
-            raise ValueError(
-                f"Must provide the same number of `down_block_types` as `up_block_types`. `down_block_types`: {down_block_types}. `up_block_types`: {up_block_types}."
-            )
-
-        if len(block_out_channels) != len(down_block_types):
-            raise ValueError(
-                f"Must provide the same number of `block_out_channels` as `down_block_types`. `block_out_channels`: {block_out_channels}. `down_block_types`: {down_block_types}."
-            )
+        self._check_config(
+            down_block_types=down_block_types,
+            up_block_types=up_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            cross_attention_dim=cross_attention_dim,
+            transformer_layers_per_block=transformer_layers_per_block,
+            attention_head_dim=attention_head_dim,
+            num_attention_heads=num_attention_heads,
+        )
 
         # input
-        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=1)
+        conv_in_padding = (conv_in_kernel - 1) // 2
+        self.conv_in = nn.Conv2d(
+            in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
+        )
 
         # time
-        if time_embedding_type == "fourier":
-            time_embed_dim = time_embedding_dim or block_out_channels[0] * 2
-            if time_embed_dim % 2 != 0:
-                raise ValueError(f"`time_embed_dim` should be divisible by 2, but is {time_embed_dim}.")
-            self.time_proj = GaussianFourierProjection(
-                time_embed_dim // 2, set_W_to_weight=False, log=False, flip_sin_to_cos=flip_sin_to_cos
-            )
-            timestep_input_dim = time_embed_dim
-        elif time_embedding_type == "positional":
-            time_embed_dim = time_embedding_dim or block_out_channels[0] * 4
-
-            self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
-            timestep_input_dim = block_out_channels[0]
-        else:
-            raise ValueError(
-                f"{time_embedding_type} does not exist. Please make sure to use one of `fourier` or `positional`."
-            )
+        time_embed_dim, timestep_input_dim = self._set_time_proj(
+            time_embedding_type,
+            block_out_channels=block_out_channels,
+            flip_sin_to_cos=flip_sin_to_cos,
+            freq_shift=freq_shift,
+            time_embedding_dim=time_embedding_dim,
+        )
 
         self.time_embedding = TimestepEmbedding(
             timestep_input_dim,
@@ -269,96 +172,33 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             cond_proj_dim=time_cond_proj_dim,
         )
 
-        if encoder_hid_dim_type is None and encoder_hid_dim is not None:
-            encoder_hid_dim_type = "text_proj"
-            self.register_to_config(encoder_hid_dim_type=encoder_hid_dim_type)
-            logger.info("encoder_hid_dim_type defaults to 'text_proj' as `encoder_hid_dim` is defined.")
-
-        if encoder_hid_dim is None and encoder_hid_dim_type is not None:
-            raise ValueError(
-                f"`encoder_hid_dim` has to be defined when `encoder_hid_dim_type` is set to {encoder_hid_dim_type}."
-            )
-
-        if encoder_hid_dim_type == "text_proj":
-            self.encoder_hid_proj = nn.Linear(encoder_hid_dim, cross_attention_dim)
-        elif encoder_hid_dim_type == "text_image_proj":
-            # image_embed_dim DOESN'T have to be `cross_attention_dim`. To not clutter the __init__ too much
-            # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
-            # case when `addition_embed_type == "text_image_proj"` (Kadinsky 2.1)`
-            self.encoder_hid_proj = TextImageProjection(
-                text_embed_dim=encoder_hid_dim,
-                image_embed_dim=cross_attention_dim,
-                cross_attention_dim=cross_attention_dim,
-            )
-        elif encoder_hid_dim_type == "image_proj":
-            # Kandinsky 2.2
-            self.encoder_hid_proj = ImageProjection(
-                image_embed_dim=encoder_hid_dim,
-                cross_attention_dim=cross_attention_dim,
-            )
-        elif encoder_hid_dim_type is not None:
-            raise ValueError(
-                f"encoder_hid_dim_type: {encoder_hid_dim_type} must be None, 'text_proj' or 'text_image_proj'."
-            )
-        else:
-            self.encoder_hid_proj = None
+        self._set_encoder_hid_proj(
+            encoder_hid_dim_type,
+            cross_attention_dim=cross_attention_dim,
+            encoder_hid_dim=encoder_hid_dim,
+        )
 
         # class embedding
-        if class_embed_type is None and num_class_embeds is not None:
-            self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
-        elif class_embed_type == "timestep":
-            self.class_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim, act_fn=act_fn)
-        elif class_embed_type == "identity":
-            self.class_embedding = nn.Identity(time_embed_dim, time_embed_dim)
-        elif class_embed_type == "projection":
-            if projection_class_embeddings_input_dim is None:
-                raise ValueError(
-                    "`class_embed_type`: 'projection' requires `projection_class_embeddings_input_dim` be set"
-                )
-            # The projection `class_embed_type` is the same as the timestep `class_embed_type` except
-            # 1. the `class_labels` inputs are not first converted to sinusoidal embeddings
-            # 2. it projects from an arbitrary input dimension.
-            #
-            # Note that `TimestepEmbedding` is quite general, being mainly linear layers and activations.
-            # When used for embedding actual timesteps, the timesteps are first converted to sinusoidal embeddings.
-            # As a result, `TimestepEmbedding` can be passed arbitrary vectors.
-            self.class_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
-        elif class_embed_type == "simple_projection":
-            if projection_class_embeddings_input_dim is None:
-                raise ValueError(
-                    "`class_embed_type`: 'simple_projection' requires `projection_class_embeddings_input_dim` be set"
-                )
-            self.class_embedding = nn.Linear(projection_class_embeddings_input_dim, time_embed_dim)
-        else:
-            self.class_embedding = None
+        self._set_class_embedding(
+            class_embed_type,
+            act_fn=act_fn,
+            num_class_embeds=num_class_embeds,
+            projection_class_embeddings_input_dim=projection_class_embeddings_input_dim,
+            time_embed_dim=time_embed_dim,
+            timestep_input_dim=timestep_input_dim,
+        )
 
-        if addition_embed_type == "text":
-            if encoder_hid_dim is not None:
-                text_time_embedding_from_dim = encoder_hid_dim
-            else:
-                text_time_embedding_from_dim = cross_attention_dim
-
-            self.add_embedding = TextTimeEmbedding(
-                text_time_embedding_from_dim, time_embed_dim, num_heads=addition_embed_type_num_heads
-            )
-        elif addition_embed_type == "text_image":
-            # text_embed_dim and image_embed_dim DON'T have to be `cross_attention_dim`. To not clutter the __init__ too much
-            # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
-            # case when `addition_embed_type == "text_image"` (Kadinsky 2.1)`
-            self.add_embedding = TextImageTimeEmbedding(
-                text_embed_dim=cross_attention_dim, image_embed_dim=cross_attention_dim, time_embed_dim=time_embed_dim
-            )
-        elif addition_embed_type == "text_time":
-            self.add_time_proj = Timesteps(addition_time_embed_dim, flip_sin_to_cos, freq_shift)
-            self.add_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
-        elif addition_embed_type == "image":
-            # Kandinsky 2.2
-            self.add_embedding = ImageTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
-        elif addition_embed_type == "image_hint":
-            # Kandinsky 2.2 ControlNet
-            self.add_embedding = ImageHintTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
-        elif addition_embed_type is not None:
-            raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
+        self._set_add_embedding(
+            addition_embed_type,
+            addition_embed_type_num_heads=addition_embed_type_num_heads,
+            addition_time_embed_dim=addition_time_embed_dim,
+            cross_attention_dim=cross_attention_dim,
+            encoder_hid_dim=encoder_hid_dim,
+            flip_sin_to_cos=flip_sin_to_cos,
+            freq_shift=freq_shift,
+            projection_class_embeddings_input_dim=projection_class_embeddings_input_dim,
+            time_embed_dim=time_embed_dim,
+        )
 
         if time_embedding_act_fn is None:
             self.time_embed_act = None
@@ -367,15 +207,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 
         self.down_blocks = nn.ModuleList([])
         self.up_blocks = nn.ModuleList([])
-
-        if isinstance(only_cross_attention, bool):
-            if mid_block_only_cross_attention is None:
-                mid_block_only_cross_attention = only_cross_attention
-
-            only_cross_attention = [only_cross_attention] * len(down_block_types)
-
-        if mid_block_only_cross_attention is None:
-            mid_block_only_cross_attention = False
 
         if isinstance(num_attention_heads, int):
             num_attention_heads = (num_attention_heads,) * len(down_block_types)
@@ -420,10 +251,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=cross_attention_dim[i],
                 num_attention_heads=num_attention_heads[i],
-                downsample_padding=1,
-                dual_cross_attention=dual_cross_attention,
-                use_linear_projection=use_linear_projection,
-                only_cross_attention=only_cross_attention[i],
+                downsample_padding=downsample_padding,
                 upcast_attention=upcast_attention,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 attention_type=attention_type,
@@ -434,76 +262,50 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 dropout=dropout,
             )
             if hasattr(down_block, 'attentions'):
-                down_block.attentions = nn.ModuleList([AttnIdentity() for _ in down_block.attentions])
+                for attn_module in down_block.attentions:
+                    if hasattr(attn_module, 'transformer_blocks'):
+                        attn_module.transformer_blocks = nn.ModuleList(
+                            [SimAttnIdentity(
+                                block_out_channels[i], refer_out_channels[i]
+                            ) for _ in attn_module.transformer_blocks])
             self.down_blocks.append(down_block)
 
         # mid
-        if mid_block_type == "UNetMidBlock2DCrossAttn":
-            self.mid_block = UNetMidBlock2DCrossAttn(
-                transformer_layers_per_block=transformer_layers_per_block[-1],
-                in_channels=block_out_channels[-1],
-                temb_channels=blocks_time_embed_dim,
-                dropout=dropout,
-                resnet_eps=norm_eps,
-                resnet_act_fn=act_fn,
-                resnet_time_scale_shift=resnet_time_scale_shift,
-                cross_attention_dim=cross_attention_dim[-1],
-                num_attention_heads=num_attention_heads[-1],
-                resnet_groups=norm_num_groups,
-                dual_cross_attention=dual_cross_attention,
-                use_linear_projection=use_linear_projection,
-                upcast_attention=upcast_attention,
-                attention_type=attention_type,
-            )
-        elif mid_block_type == "UNetMidBlock2DSimpleCrossAttn":
-            self.mid_block = UNetMidBlock2DSimpleCrossAttn(
-                in_channels=block_out_channels[-1],
-                temb_channels=blocks_time_embed_dim,
-                dropout=dropout,
-                resnet_eps=norm_eps,
-                resnet_act_fn=act_fn,
-                cross_attention_dim=cross_attention_dim[-1],
-                attention_head_dim=attention_head_dim[-1],
-                resnet_groups=norm_num_groups,
-                resnet_time_scale_shift=resnet_time_scale_shift,
-                skip_time_act=resnet_skip_time_act,
-                only_cross_attention=mid_block_only_cross_attention,
-                cross_attention_norm=cross_attention_norm,
-            )
-        elif mid_block_type == "UNetMidBlock2D":
-            self.mid_block = UNetMidBlock2D(
-                in_channels=block_out_channels[-1],
-                temb_channels=blocks_time_embed_dim,
-                dropout=dropout,
-                num_layers=0,
-                resnet_eps=norm_eps,
-                resnet_act_fn=act_fn,
-                resnet_groups=norm_num_groups,
-                resnet_time_scale_shift=resnet_time_scale_shift,
-                add_attention=False,
-            )
-        elif mid_block_type is None:
-            self.mid_block = None
-        else:
-            raise ValueError(f"unknown mid_block_type : {mid_block_type}")
-
+        self.mid_block = get_mid_block(
+            mid_block_type,
+            temb_channels=blocks_time_embed_dim,
+            in_channels=block_out_channels[-1],
+            resnet_eps=norm_eps,
+            resnet_act_fn=act_fn,
+            resnet_groups=norm_num_groups,
+            transformer_layers_per_block=transformer_layers_per_block[-1],
+            num_attention_heads=num_attention_heads[-1],
+            cross_attention_dim=cross_attention_dim[-1],
+            upcast_attention=upcast_attention,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+            attention_type=attention_type,
+            resnet_skip_time_act=resnet_skip_time_act,
+            cross_attention_norm=cross_attention_norm,
+            attention_head_dim=attention_head_dim[-1],
+            dropout=dropout,
+        )
         if self.mid_block is not None and hasattr(self.mid_block, 'attentions'):
-            self.mid_block.attentions = nn.ModuleList([AttnIdentity() for _ in self.mid_block.attentions])
+            for attn_module in self.mid_block.attentions:
+                    attn_module.transformer_blocks = nn.ModuleList(
+                        [SimAttnIdentity(
+                            block_out_channels[-1], refer_out_channels[-1]
+                        ) for _ in attn_module.transformer_blocks])
 
         # count how many layers upsample the images
         self.num_upsamplers = 0
 
         # up
         reversed_block_out_channels = list(reversed(block_out_channels))
+        reversed_refer_out_channels = list(reversed(refer_out_channels))
         reversed_num_attention_heads = list(reversed(num_attention_heads))
         reversed_layers_per_block = list(reversed(layers_per_block))
         reversed_cross_attention_dim = list(reversed(cross_attention_dim))
-        reversed_transformer_layers_per_block = (
-            list(reversed(transformer_layers_per_block))
-            if reverse_transformer_layers_per_block is None
-            else reverse_transformer_layers_per_block
-        )
-        only_cross_attention = list(reversed(only_cross_attention))
+        reversed_transformer_layers_per_block = list(reversed(transformer_layers_per_block))
 
         output_channel = reversed_block_out_channels[0]
         for i, up_block_type in enumerate(up_block_types):
@@ -535,9 +337,6 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 resnet_groups=norm_num_groups,
                 cross_attention_dim=reversed_cross_attention_dim[i],
                 num_attention_heads=reversed_num_attention_heads[i],
-                dual_cross_attention=dual_cross_attention,
-                use_linear_projection=use_linear_projection,
-                only_cross_attention=only_cross_attention[i],
                 upcast_attention=upcast_attention,
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 attention_type=attention_type,
@@ -548,29 +347,211 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 dropout=dropout,
             )
             if hasattr(up_block, 'attentions'):
-                up_block.attentions = nn.ModuleList([AttnIdentity() for _ in up_block.attentions])
+                for attn_module in up_block.attentions:
+                    if hasattr(attn_module, 'transformer_blocks'):
+                        attn_module.transformer_blocks = nn.ModuleList(
+                            [SimAttnIdentity(
+                                reversed_block_out_channels[i], reversed_refer_out_channels[i]
+                            ) for _ in attn_module.transformer_blocks])
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
 
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].is_final_block = True
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn1 = None
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm2 = nn.Identity()
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].attn2 = None
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].norm3 = nn.Identity()
-        # self.up_blocks[-1].attentions[-1].transformer_blocks[0].ff = nn.Identity()
-        # self.up_blocks[-1].attentions[-1].proj_out = nn.Identity()
+        if hasattr(self.up_blocks[-1], 'attentions'):
+            self.up_blocks[-1].attentions[-1].proj_out = nn.Identity()
 
-        if attention_type in ["gated", "gated-text-image"]:
-            positive_len = 768
-            if isinstance(cross_attention_dim, int):
-                positive_len = cross_attention_dim
-            elif isinstance(cross_attention_dim, tuple) or isinstance(cross_attention_dim, list):
-                positive_len = cross_attention_dim[0]
-
-            feature_type = "text-only" if attention_type == "gated" else "text-image"
-            self.position_net = GLIGENTextBoundingboxProjection(
-                positive_len=positive_len, out_dim=cross_attention_dim, feature_type=feature_type
+    def _check_config(
+        self,
+        down_block_types: Tuple[str],
+        up_block_types: Tuple[str],
+        block_out_channels: Tuple[int],
+        layers_per_block: Union[int, Tuple[int]],
+        cross_attention_dim: Union[int, Tuple[int]],
+        transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple[int]]],
+        attention_head_dim: int,
+        num_attention_heads: Optional[Union[int, Tuple[int]]],
+    ):
+        if len(down_block_types) != len(up_block_types):
+            raise ValueError(
+                f"Must provide the same number of `down_block_types` as `up_block_types`. `down_block_types`: {down_block_types}. `up_block_types`: {up_block_types}."
             )
+
+        if len(block_out_channels) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `block_out_channels` as `down_block_types`. `block_out_channels`: {block_out_channels}. `down_block_types`: {down_block_types}."
+            )
+
+        if not isinstance(num_attention_heads, int) and len(num_attention_heads) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `num_attention_heads` as `down_block_types`. `num_attention_heads`: {num_attention_heads}. `down_block_types`: {down_block_types}."
+            )
+
+        if not isinstance(attention_head_dim, int) and len(attention_head_dim) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `attention_head_dim` as `down_block_types`. `attention_head_dim`: {attention_head_dim}. `down_block_types`: {down_block_types}."
+            )
+
+        if isinstance(cross_attention_dim, list) and len(cross_attention_dim) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `cross_attention_dim` as `down_block_types`. `cross_attention_dim`: {cross_attention_dim}. `down_block_types`: {down_block_types}."
+            )
+
+        if not isinstance(layers_per_block, int) and len(layers_per_block) != len(down_block_types):
+            raise ValueError(
+                f"Must provide the same number of `layers_per_block` as `down_block_types`. `layers_per_block`: {layers_per_block}. `down_block_types`: {down_block_types}."
+            )
+
+    def _set_time_proj(
+        self,
+        time_embedding_type: str,
+        block_out_channels: int,
+        flip_sin_to_cos: bool,
+        freq_shift: float,
+        time_embedding_dim: int,
+    ) -> Tuple[int, int]:
+        if time_embedding_type == "fourier":
+            time_embed_dim = time_embedding_dim or block_out_channels[0] * 2
+            if time_embed_dim % 2 != 0:
+                raise ValueError(f"`time_embed_dim` should be divisible by 2, but is {time_embed_dim}.")
+            self.time_proj = GaussianFourierProjection(
+                time_embed_dim // 2, set_W_to_weight=False, log=False, flip_sin_to_cos=flip_sin_to_cos
+            )
+            timestep_input_dim = time_embed_dim
+        elif time_embedding_type == "positional":
+            time_embed_dim = time_embedding_dim or block_out_channels[0] * 4
+
+            self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
+            timestep_input_dim = block_out_channels[0]
+        else:
+            raise ValueError(
+                f"{time_embedding_type} does not exist. Please make sure to use one of `fourier` or `positional`."
+            )
+
+        return time_embed_dim, timestep_input_dim
+
+    def _set_encoder_hid_proj(
+        self,
+        encoder_hid_dim_type: Optional[str],
+        cross_attention_dim: Union[int, Tuple[int]],
+        encoder_hid_dim: Optional[int],
+    ):
+        if encoder_hid_dim_type is None and encoder_hid_dim is not None:
+            encoder_hid_dim_type = "text_proj"
+            self.register_to_config(encoder_hid_dim_type=encoder_hid_dim_type)
+            logger.info("encoder_hid_dim_type defaults to 'text_proj' as `encoder_hid_dim` is defined.")
+
+        if encoder_hid_dim is None and encoder_hid_dim_type is not None:
+            raise ValueError(
+                f"`encoder_hid_dim` has to be defined when `encoder_hid_dim_type` is set to {encoder_hid_dim_type}."
+            )
+
+        if encoder_hid_dim_type == "text_proj":
+            self.encoder_hid_proj = nn.Linear(encoder_hid_dim, cross_attention_dim)
+        elif encoder_hid_dim_type == "text_image_proj":
+            # image_embed_dim DOESN'T have to be `cross_attention_dim`. To not clutter the __init__ too much
+            # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
+            # case when `addition_embed_type == "text_image_proj"` (Kandinsky 2.1)`
+            self.encoder_hid_proj = TextImageProjection(
+                text_embed_dim=encoder_hid_dim,
+                image_embed_dim=cross_attention_dim,
+                cross_attention_dim=cross_attention_dim,
+            )
+        elif encoder_hid_dim_type == "image_proj":
+            # Kandinsky 2.2
+            self.encoder_hid_proj = ImageProjection(
+                image_embed_dim=encoder_hid_dim,
+                cross_attention_dim=cross_attention_dim,
+            )
+        elif encoder_hid_dim_type == "vip_image_proj":
+            self.encoder_hid_proj = IPAdapterPlusImageProjection(
+                embed_dims=encoder_hid_dim,
+                output_dims=cross_attention_dim,
+                hidden_dims=cross_attention_dim,
+                heads=12,
+                num_queries=16,
+            )
+        elif encoder_hid_dim_type is not None:
+            raise ValueError(
+                f"encoder_hid_dim_type: {encoder_hid_dim_type} must be None, 'text_proj' or 'text_image_proj'."
+            )
+        else:
+            self.encoder_hid_proj = None
+
+    def _set_class_embedding(
+        self,
+        class_embed_type: Optional[str],
+        act_fn: str,
+        num_class_embeds: Optional[int],
+        projection_class_embeddings_input_dim: Optional[int],
+        time_embed_dim: int,
+        timestep_input_dim: int,
+    ):
+        if class_embed_type is None and num_class_embeds is not None:
+            self.class_embedding = nn.Embedding(num_class_embeds, time_embed_dim)
+        elif class_embed_type == "timestep":
+            self.class_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim, act_fn=act_fn)
+        elif class_embed_type == "identity":
+            self.class_embedding = nn.Identity(time_embed_dim, time_embed_dim)
+        elif class_embed_type == "projection":
+            if projection_class_embeddings_input_dim is None:
+                raise ValueError(
+                    "`class_embed_type`: 'projection' requires `projection_class_embeddings_input_dim` be set"
+                )
+            # The projection `class_embed_type` is the same as the timestep `class_embed_type` except
+            # 1. the `class_labels` inputs are not first converted to sinusoidal embeddings
+            # 2. it projects from an arbitrary input dimension.
+            #
+            # Note that `TimestepEmbedding` is quite general, being mainly linear layers and activations.
+            # When used for embedding actual timesteps, the timesteps are first converted to sinusoidal embeddings.
+            # As a result, `TimestepEmbedding` can be passed arbitrary vectors.
+            self.class_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
+        elif class_embed_type == "simple_projection":
+            if projection_class_embeddings_input_dim is None:
+                raise ValueError(
+                    "`class_embed_type`: 'simple_projection' requires `projection_class_embeddings_input_dim` be set"
+                )
+            self.class_embedding = nn.Linear(projection_class_embeddings_input_dim, time_embed_dim)
+        else:
+            self.class_embedding = None
+
+    def _set_add_embedding(
+        self,
+        addition_embed_type: str,
+        addition_embed_type_num_heads: int,
+        addition_time_embed_dim: Optional[int],
+        flip_sin_to_cos: bool,
+        freq_shift: float,
+        cross_attention_dim: Optional[int],
+        encoder_hid_dim: Optional[int],
+        projection_class_embeddings_input_dim: Optional[int],
+        time_embed_dim: int,
+    ):
+        if addition_embed_type == "text":
+            if encoder_hid_dim is not None:
+                text_time_embedding_from_dim = encoder_hid_dim
+            else:
+                text_time_embedding_from_dim = cross_attention_dim
+
+            self.add_embedding = TextTimeEmbedding(
+                text_time_embedding_from_dim, time_embed_dim, num_heads=addition_embed_type_num_heads
+            )
+        elif addition_embed_type == "text_image":
+            # text_embed_dim and image_embed_dim DON'T have to be `cross_attention_dim`. To not clutter the __init__ too much
+            # they are set to `cross_attention_dim` here as this is exactly the required dimension for the currently only use
+            # case when `addition_embed_type == "text_image"` (Kandinsky 2.1)`
+            self.add_embedding = TextImageTimeEmbedding(
+                text_embed_dim=cross_attention_dim, image_embed_dim=cross_attention_dim, time_embed_dim=time_embed_dim
+            )
+        elif addition_embed_type == "text_time":
+            self.add_time_proj = Timesteps(addition_time_embed_dim, flip_sin_to_cos, freq_shift)
+            self.add_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
+        elif addition_embed_type == "image":
+            # Kandinsky 2.2
+            self.add_embedding = ImageTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
+        elif addition_embed_type == "image_hint":
+            # Kandinsky 2.2 ControlNet
+            self.add_embedding = ImageHintTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
+        elif addition_embed_type is not None:
+            raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
 
     @property
     def attn_processors(self) -> Dict[str, AttentionProcessor]:
@@ -596,9 +577,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 
         return processors
 
-    def set_attn_processor(
-        self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]], _remove_lora=False
-    ):
+    def set_attn_processor(self, processor: Union[AttentionProcessor, Dict[str, AttentionProcessor]]):
         r"""
         Sets the attention processor to use to compute attention.
 
@@ -622,9 +601,9 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
             if hasattr(module, "set_processor"):
                 if not isinstance(processor, dict):
-                    module.set_processor(processor, _remove_lora=_remove_lora)
+                    module.set_processor(processor)
                 else:
-                    module.set_processor(processor.pop(f"{name}.processor"), _remove_lora=_remove_lora)
+                    module.set_processor(processor.pop(f"{name}.processor"))
 
             for sub_name, child in module.named_children():
                 fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
@@ -645,9 +624,9 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
                 f"Cannot call `set_default_attn_processor` when attention processors are of type {next(iter(self.attn_processors.values()))}"
             )
 
-        self.set_attn_processor(processor, _remove_lora=True)
+        self.set_attn_processor(processor)
 
-    def set_attention_slice(self, slice_size):
+    def set_attention_slice(self, slice_size: Union[str, int, List[int]] = "auto"):
         r"""
         Enable sliced attention computation.
 
@@ -716,7 +695,7 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
 
-    def enable_freeu(self, s1, s2, b1, b2):
+    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
         r"""Enables the FreeU mechanism from https://arxiv.org/abs/2309.11497.
 
         The suffixes after the scaling factors represent the stage blocks where they are being applied.
@@ -750,8 +729,8 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
 
     def fuse_qkv_projections(self):
         """
-        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query,
-        key, value) are fused. For cross-attention modules, key and value projection matrices are fused.
+        Enables fused QKV projections. For self-attention modules, all projection matrices (i.e., query, key, value)
+        are fused. For cross-attention modules, key and value projection matrices are fused.
 
         <Tip warning={true}>
 
@@ -784,11 +763,148 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         if self.original_attn_processors is not None:
             self.set_attn_processor(self.original_attn_processors)
 
+    def unload_lora(self):
+        """Unloads LoRA weights."""
+        deprecate(
+            "unload_lora",
+            "0.28.0",
+            "Calling `unload_lora()` is deprecated and will be removed in a future version. Please install `peft` and then call `disable_adapters().",
+        )
+        for module in self.modules():
+            if hasattr(module, "set_lora_layer"):
+                module.set_lora_layer(None)
+
+    def get_time_embed(
+        self, sample: torch.Tensor, timestep: Union[torch.Tensor, float, int]
+    ) -> Optional[torch.Tensor]:
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = sample.device.type == "mps"
+            if isinstance(timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
+            else:
+                dtype = torch.int32 if is_mps else torch.int64
+            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
+        elif len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timesteps = timesteps.expand(sample.shape[0])
+
+        t_emb = self.time_proj(timesteps)
+        # `Timesteps` does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        t_emb = t_emb.to(dtype=sample.dtype)
+        return t_emb
+
+    def get_class_embed(self, sample: torch.Tensor, class_labels: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        class_emb = None
+        if self.class_embedding is not None:
+            if class_labels is None:
+                raise ValueError("class_labels should be provided when num_class_embeds > 0")
+
+            if self.config.class_embed_type == "timestep":
+                class_labels = self.time_proj(class_labels)
+
+                # `Timesteps` does not contain any weights and will always return f32 tensors
+                # there might be better ways to encapsulate this.
+                class_labels = class_labels.to(dtype=sample.dtype)
+
+            class_emb = self.class_embedding(class_labels).to(dtype=sample.dtype)
+        return class_emb
+
+    def get_aug_embed(
+        self, emb: torch.Tensor, encoder_hidden_states: torch.Tensor, added_cond_kwargs: Dict[str, Any]
+    ) -> Optional[torch.Tensor]:
+        aug_emb = None
+        if self.config.addition_embed_type == "text":
+            aug_emb = self.add_embedding(encoder_hidden_states)
+        elif self.config.addition_embed_type == "text_image":
+            # Kandinsky 2.1 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_image' which requires the keyword argument `image_embeds` to be passed in `added_cond_kwargs`"
+                )
+
+            image_embs = added_cond_kwargs.get("image_embeds")
+            text_embs = added_cond_kwargs.get("text_embeds", encoder_hidden_states)
+            aug_emb = self.add_embedding(text_embs, image_embs)
+        elif self.config.addition_embed_type == "text_time":
+            # SDXL - style
+            if "text_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_time' which requires the keyword argument `text_embeds` to be passed in `added_cond_kwargs`"
+                )
+            text_embeds = added_cond_kwargs.get("text_embeds")
+            if "time_ids" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_time' which requires the keyword argument `time_ids` to be passed in `added_cond_kwargs`"
+                )
+            time_ids = added_cond_kwargs.get("time_ids")
+            time_embeds = self.add_time_proj(time_ids.flatten())
+            time_embeds = time_embeds.reshape((text_embeds.shape[0], -1))
+            add_embeds = torch.concat([text_embeds, time_embeds], dim=-1)
+            add_embeds = add_embeds.to(emb.dtype)
+            aug_emb = self.add_embedding(add_embeds)
+        elif self.config.addition_embed_type == "image":
+            # Kandinsky 2.2 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `addition_embed_type` set to 'image' which requires the keyword argument `image_embeds` to be passed in `added_cond_kwargs`"
+                )
+            image_embs = added_cond_kwargs.get("image_embeds")
+            aug_emb = self.add_embedding(image_embs)
+        elif self.config.addition_embed_type == "image_hint":
+            # Kandinsky 2.2 - style
+            if "image_embeds" not in added_cond_kwargs or "hint" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `addition_embed_type` set to 'image_hint' which requires the keyword arguments `image_embeds` and `hint` to be passed in `added_cond_kwargs`"
+                )
+            image_embs = added_cond_kwargs.get("image_embeds")
+            hint = added_cond_kwargs.get("hint")
+            aug_emb = self.add_embedding(image_embs, hint)
+        return aug_emb
+
+    def process_encoder_hidden_states(
+        self, encoder_hidden_states: torch.Tensor, added_cond_kwargs: Dict[str, Any]
+    ) -> torch.Tensor:
+        if self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_proj":
+            encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states)
+        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_image_proj":
+            # Kandinsky 2.1 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'text_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states, image_embeds)
+        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type in ["image_proj", "vip_image_proj"]:
+            # Kandinsky 2.2 - style
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            encoder_hidden_states = self.encoder_hid_proj(image_embeds)
+        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "ip_image_proj":
+            if "image_embeds" not in added_cond_kwargs:
+                raise ValueError(
+                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'ip_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
+                )
+            image_embeds = added_cond_kwargs.get("image_embeds")
+            image_embeds = self.encoder_hid_proj(image_embeds)
+            encoder_hidden_states = (encoder_hidden_states, image_embeds)
+        return encoder_hidden_states
+
     def forward(
         self,
         sample: torch.FloatTensor,
         timestep: Union[torch.Tensor, float, int],
-        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -835,96 +951,22 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. time
-        timesteps = timestep
-        if not torch.is_tensor(timesteps):
-            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
-            # This would be a good case for the `match` statement (Python 3.10+)
-            is_mps = sample.device.type == "mps"
-            if isinstance(timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
-            else:
-                dtype = torch.int32 if is_mps else torch.int64
-            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
-        elif len(timesteps.shape) == 0:
-            timesteps = timesteps[None].to(sample.device)
-
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timesteps = timesteps.expand(sample.shape[0])
-
-        t_emb = self.time_proj(timesteps)
-
-        # `Timesteps` does not contain any weights and will always return f32 tensors
-        # but time_embedding might actually be running in fp16. so we need to cast here.
-        # there might be better ways to encapsulate this.
-        t_emb = t_emb.to(dtype=sample.dtype)
-
+        t_emb = self.get_time_embed(sample=sample, timestep=timestep)
         emb = self.time_embedding(t_emb, timestep_cond)
         aug_emb = None
 
-        if self.class_embedding is not None:
-            if class_labels is None:
-                raise ValueError("class_labels should be provided when num_class_embeds > 0")
-
-            if self.config.class_embed_type == "timestep":
-                class_labels = self.time_proj(class_labels)
-
-                # `Timesteps` does not contain any weights and will always return f32 tensors
-                # there might be better ways to encapsulate this.
-                class_labels = class_labels.to(dtype=sample.dtype)
-
-            class_emb = self.class_embedding(class_labels).to(dtype=sample.dtype)
-
+        class_emb = self.get_class_embed(sample=sample, class_labels=class_labels)
+        if class_emb is not None:
             if self.config.class_embeddings_concat:
                 emb = torch.cat([emb, class_emb], dim=-1)
             else:
                 emb = emb + class_emb
 
-        if self.config.addition_embed_type == "text":
-            aug_emb = self.add_embedding(encoder_hidden_states)
-        elif self.config.addition_embed_type == "text_image":
-            # Kandinsky 2.1 - style
-            if "image_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_image' which requires the keyword argument `image_embeds` to be passed in `added_cond_kwargs`"
-                )
-
-            image_embs = added_cond_kwargs.get("image_embeds")
-            text_embs = added_cond_kwargs.get("text_embeds", encoder_hidden_states)
-            aug_emb = self.add_embedding(text_embs, image_embs)
-        elif self.config.addition_embed_type == "text_time":
-            # SDXL - style
-            if "text_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_time' which requires the keyword argument `text_embeds` to be passed in `added_cond_kwargs`"
-                )
-            text_embeds = added_cond_kwargs.get("text_embeds")
-            if "time_ids" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `addition_embed_type` set to 'text_time' which requires the keyword argument `time_ids` to be passed in `added_cond_kwargs`"
-                )
-            time_ids = added_cond_kwargs.get("time_ids")
-            time_embeds = self.add_time_proj(time_ids.flatten())
-            time_embeds = time_embeds.reshape((text_embeds.shape[0], -1))
-            add_embeds = torch.concat([text_embeds, time_embeds], dim=-1)
-            add_embeds = add_embeds.to(emb.dtype)
-            aug_emb = self.add_embedding(add_embeds)
-        elif self.config.addition_embed_type == "image":
-            # Kandinsky 2.2 - style
-            if "image_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `addition_embed_type` set to 'image' which requires the keyword argument `image_embeds` to be passed in `added_cond_kwargs`"
-                )
-            image_embs = added_cond_kwargs.get("image_embeds")
-            aug_emb = self.add_embedding(image_embs)
-        elif self.config.addition_embed_type == "image_hint":
-            # Kandinsky 2.2 - style
-            if "image_embeds" not in added_cond_kwargs or "hint" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `addition_embed_type` set to 'image_hint' which requires the keyword arguments `image_embeds` and `hint` to be passed in `added_cond_kwargs`"
-                )
-            image_embs = added_cond_kwargs.get("image_embeds")
-            hint = added_cond_kwargs.get("hint")
-            aug_emb, hint = self.add_embedding(image_embs, hint)
+        aug_emb = self.get_aug_embed(
+            emb=emb, encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
+        )
+        if self.config.addition_embed_type == "image_hint":
+            aug_emb, hint = aug_emb
             sample = torch.cat([sample, hint], dim=1)
 
         emb = emb + aug_emb if aug_emb is not None else emb
@@ -932,33 +974,9 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         if self.time_embed_act is not None:
             emb = self.time_embed_act(emb)
 
-        if self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_proj":
-            encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states)
-        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_image_proj":
-            # Kadinsky 2.1 - style
-            if "image_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'text_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
-                )
-
-            image_embeds = added_cond_kwargs.get("image_embeds")
-            encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states, image_embeds)
-        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "image_proj":
-            # Kandinsky 2.2 - style
-            if "image_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
-                )
-            image_embeds = added_cond_kwargs.get("image_embeds")
-            encoder_hidden_states = self.encoder_hid_proj(image_embeds)
-        elif self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "ip_image_proj":
-            if "image_embeds" not in added_cond_kwargs:
-                raise ValueError(
-                    f"{self.__class__} has the config param `encoder_hid_dim_type` set to 'ip_image_proj' which requires the keyword argument `image_embeds` to be passed in  `added_conditions`"
-                )
-            image_embeds = added_cond_kwargs.get("image_embeds")
-            image_embeds = self.encoder_hid_proj(image_embeds).to(encoder_hidden_states.dtype)
-            encoder_hidden_states = torch.cat([encoder_hidden_states, image_embeds], dim=1)
+        encoder_hidden_states = self.process_encoder_hidden_states(
+            encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
+        )
 
         # 2. pre-process
         sample = self.conv_in(sample)
@@ -1031,15 +1049,15 @@ class ReferenceNetModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin):
         return UNet2DConditionOutput(sample=sample)
 
 
-class AttnIdentity(nn.Module):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+class SimAttnIdentity(nn.Module):
+    def __init__(self, in_channels, out_channels, **kwargs: Any) -> None:
         super().__init__()
+        self.proj = nn.Linear(in_channels, out_channels)
         self.bank = None
 
-    def forward(self, input, *args, **kwargs):
-        self.bank = input.reshape(list(input.shape[:2]) + [-1,]).transpose(1, 2)
-        return_dict = kwargs.get("return_dict", False)
-        if not return_dict:
-            return (input, )
-        else:
-            return Transformer2DModelOutput(sample=input)
+    def forward(self,
+                input,
+                *args,
+                **kwargs):
+        self.bank = self.proj(input)
+        return input

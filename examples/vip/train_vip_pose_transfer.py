@@ -431,8 +431,6 @@ def main(args):
         referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
 
     # unet.requires_grad_(False)
-    # train_unet_cross_attn(unet)
-    # cast_training_params(unet)
     # unet.to(accelerator.device, dtype=weight_dtype)
 
     if args.enable_xformers_memory_efficient_attention:

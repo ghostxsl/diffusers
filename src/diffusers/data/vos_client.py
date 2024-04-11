@@ -33,6 +33,8 @@ class VOSClient:
             verify=False,
             use_ssl=False)
 
+        self.custom_headers = {'x-vip-force-rewrite', 'true'}
+
     @staticmethod
     def get_pil_bytes(img, format='PNG', quality=90):
         # format: JPEG, PNG, GIF
