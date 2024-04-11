@@ -37,7 +37,7 @@ from ...utils import USE_PEFT_BACKEND, logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from diffusers.models.reference_attention import ReferenceAttentionControl
-from diffusers.models.referencenet import ReferenceNetModel
+from diffusers.models.vip import SimReferenceNetModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -76,6 +76,7 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
         ],
         feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection,
+        referencenet: SimReferenceNetModel = None,
     ):
         super().__init__()
 
@@ -86,6 +87,10 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             feature_extractor=feature_extractor,
             image_encoder=image_encoder,
         )
+        if referencenet is not None:
+            self.register_modules(referencenet=referencenet)
+            self.reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
+
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
@@ -183,59 +188,6 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.check_inputs
-    def check_inputs(
-        self,
-        prompt,
-        height,
-        width,
-        callback_steps,
-        negative_prompt=None,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-        callback_on_step_end_tensor_inputs=None,
-    ):
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-
-        if callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
-        if callback_on_step_end_tensor_inputs is not None and not all(
-            k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
-        ):
-            raise ValueError(
-                f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
-            )
-
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-
-        if negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
-
-        if prompt_embeds is not None and negative_prompt_embeds is not None:
-            if prompt_embeds.shape != negative_prompt_embeds.shape:
-                raise ValueError(
-                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
-                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
-                    f" {negative_prompt_embeds.shape}."
-                )
-
     # Copied from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_synth.TextToVideoSDPipeline.prepare_latents
     def prepare_latents(
         self, batch_size, num_channels_latents, height, width, dtype, device, generator
@@ -307,6 +259,14 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             image_embeds = torch.cat([uncond_image_embeds, image_embeds])
         dtype = image_embeds.dtype
 
+        # 1.2 Prepare reference image latents
+        if self.referencenet is not None:
+            reference_image = self.image_processor.preprocess(image).to(device, dtype=dtype)
+            reference_latents = self._encode_vae_image(reference_image, generator)
+            if do_classifier_free_guidance:
+                reference_latents = torch.cat([
+                    torch.zeros_like(reference_latents), reference_latents])
+
         # 2. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
@@ -333,6 +293,10 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                if self.referencenet is not None:
+                    self.referencenet(reference_latents, t)
+                    self.reference_control_reader.update(self.referencenet, dtype=dtype)
 
                 # predict the noise residual
                 noise_pred = self.unet(

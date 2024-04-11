@@ -35,6 +35,7 @@ __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
     'AnimateDataset', 'PoseTransDataset', 'ImageVariationDataset',
+    'ConXSPoseDataset',
 ]
 
 
@@ -555,7 +556,7 @@ class AnimateDataset(torch.utils.data.Dataset):
     def get_metadata(self, dataset_file):
         print("Loading dataset...")
         if self.use_vos:
-            dataset_file = [d.strip() for d in dataset_file.split(',')]
+            dataset_file = [d.strip() for d in dataset_file.split(',') if len(d.strip()) > 0]
             out = {}
             for file_path in dataset_file:
                 temp = load_file(file_path)
@@ -792,6 +793,7 @@ class PoseTransDataset(torch.utils.data.Dataset):
             ]
         )
         self.img_normalize = Normalize([0.5], [0.5], inplace=True)
+        self.random_hflip = RandomHorizontalFlip()
 
     def __len__(self):
         return self._length
@@ -799,7 +801,7 @@ class PoseTransDataset(torch.utils.data.Dataset):
     def get_metadata(self, dataset_file):
         print("Loading dataset...")
         if self.use_vos:
-            dataset_file = [d.strip() for d in dataset_file.split(',')]
+            dataset_file = [d.strip() for d in dataset_file.split(',') if len(d.strip()) > 0]
             out = {}
             for file_path in dataset_file:
                 temp = load_file(file_path)
@@ -879,11 +881,11 @@ class PoseTransDataset(torch.utils.data.Dataset):
             st_idx = len(video_list) - 2 * self.clip_length if end_idx == len(video_list) else st_idx
             end_idx = 2 * self.clip_length if st_idx == 0 else end_idx
             video_list = video_list[st_idx: end_idx]
-            video_list.remove(item)
 
+        if len(video_list) > 1:
+            video_list.remove(item)
         ref_item = random.choice(video_list)
         ref_img, ref_points, ref_matting = self.load_img_points_matting(ref_item)
-        # ref_img, ref_matting = self.load_ref_img_matting(ref_item)
         data = {
             'image': img,
             'condition': points,
@@ -902,16 +904,17 @@ class PoseTransDataset(torch.utils.data.Dataset):
         example = {}
         data = self.get_data(index)
 
-        example["pixel_values"] = self.img_normalize(data['image'])
-        example["conditioning_pixel_values"] = data['condition_image']
-        example["reference_pixel_values"] = self.img_normalize(ToTensor()(data['reference_image']))
+        example["pixel_values"] = self.img_normalize(data["image"])
+        example["conditioning_pixel_values"] = data["condition_image"]
+        reference_image = self.random_hflip(data["reference_image"])
+        example["reference_pixel_values"] = self.img_normalize(self.to_tensor(reference_image))
 
         example["uncond"] = torch.tensor(
             [[[0.]]]) if random.random() < self.prob_uncond else torch.tensor([[[1.]]])
 
         if self.clip_processor is not None:
             example["reference_image"] = self.clip_processor(
-                images=data["reference_image"], return_tensors="pt").pixel_values
+                images=reference_image, return_tensors="pt").pixel_values
 
         return example
 
@@ -944,6 +947,10 @@ class ImageVariationDataset(torch.utils.data.Dataset):
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
                 RandomCrop(img_size),
                 RandomHorizontalFlip(),
+            ]
+        )
+        self.normalize_ = tv_transforms.Compose(
+            [
                 ToTensor(),
                 Normalize([0.5], [0.5], inplace=True),
             ]
@@ -954,7 +961,7 @@ class ImageVariationDataset(torch.utils.data.Dataset):
 
     def get_metadata(self, dataset_file, train_data_dir):
         print("Loading dataset...")
-        dataset_file = [a.strip() for a in dataset_file.split(',')]
+        dataset_file = [a.strip() for a in dataset_file.split(',') if len(a.strip()) > 0]
 
         out_list = []
         if self.use_vos:
@@ -968,7 +975,7 @@ class ImageVariationDataset(torch.utils.data.Dataset):
                 else:
                     raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
         else:
-            train_data_dir = [a.strip() for a in train_data_dir.split(',')]
+            train_data_dir = [a.strip() for a in train_data_dir.split(',') if len(a.strip()) > 0]
             for file_, tdir in zip(dataset_file, train_data_dir):
                 temp_list = load_file(file_)
                 for name, caption in tqdm(temp_list):
@@ -984,17 +991,117 @@ class ImageVariationDataset(torch.utils.data.Dataset):
         if self.use_vos:
             img = self.vos.download_vos_pil(img)
         img = load_image(img)
-        return img
+        data = {
+            "image": img,
+            "reference_image": img.copy(),
+        }
+        return data
 
     def __getitem__(self, index):
         example = {}
         item = self.metadata[index]
 
-        img = self.get_data(item)
-        example["pixel_values"] = self.image_transforms(img)
+        data = self.get_data(item)
+        data = self.image_transforms(data)
+
+        example["pixel_values"] = self.normalize_(data["image"])
         if self.clip_processor is not None:
-            example["ref_pixel_values"] = self.clip_processor(
-                images=img, return_tensors="pt").pixel_values
+            example["reference_image"] = self.clip_processor(
+                images=data["reference_image"], return_tensors="pt").pixel_values
+
+            example["uncond"] = torch.tensor(
+                [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
+
+        return example
+
+
+class ConXSPoseDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_file,
+        train_data_dir,
+        condition_data_dir,
+        clip_processor=None,
+        img_size=512,
+        prob_uncond=0.1,
+        use_vos=False,
+    ):
+        if prob_uncond < 0. or prob_uncond > 1.:
+            raise ValueError("`prob_uncond` must be in the range [0., 1.].")
+
+        self.clip_processor = clip_processor
+        self.prob_uncond = prob_uncond
+        self.use_vos = use_vos
+
+        self.metadata = self.get_metadata(dataset_file, train_data_dir, condition_data_dir)
+        self._length = len(self.metadata)
+
+        if use_vos:
+            self.vos = VOSClient()
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                DrawPose(),
+                RandomCrop(img_size),
+                RandomHorizontalFlip(),
+            ]
+        )
+        self.to_tensor = ToTensor()
+        self.img_normalize = Normalize([0.5], [0.5], inplace=True)
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file, train_data_dir, condition_data_dir):
+        print("Loading dataset...")
+        dataset_file = [d.strip() for d in dataset_file.split(',') if len(d.strip()) > 0]
+
+        out = []
+        if self.use_vos:
+            for file_ in dataset_file:
+                temp_list = load_file(file_)
+                out.extend(temp_list)
+        else:
+            train_data_dir = [d.strip() for d in train_data_dir.split(',') if len(d.strip()) > 0]
+            condition_data_dir = [d.strip() for d in condition_data_dir.split(',') if len(d.strip()) > 0]
+            for file_, tdir, cdir in zip(dataset_file, train_data_dir, condition_data_dir):
+                temp_list = load_file(file_)
+                for name, caption in tqdm(temp_list):
+                    out.append({
+                        "image": join(tdir, name),
+                        "pose": join(cdir, splitext(name)[0] + '.pose'),
+                        "caption": caption
+                    })
+        return out
+
+    def load_img_points(self, item):
+        if self.use_vos:
+            img = self.vos.download_vos_pil(item["image"])
+            img = load_image(img)
+            points = self.vos.download_vos_pkl(item["pose"])
+        else:
+            img = load_image(item["image"])
+            points = pkl_load(item["pose"])
+
+        return img, points
+
+    def __getitem__(self, index):
+        example = {}
+        item = self.metadata[index]
+
+        img, points = self.load_img_points(item)
+        data = {
+            'image': img,
+            'condition': points,
+        }
+        data = self.image_transforms(data)
+        example["pixel_values"] = self.img_normalize(self.to_tensor(data["image"]))
+        example["conditioning_pixel_values"] = self.to_tensor(data["condition_image"])
+
+        if self.clip_processor is not None:
+            example["reference_image"] = self.clip_processor(
+                images=data["image"], return_tensors="pt").pixel_values
 
             example["uncond"] = torch.tensor(
                 [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])

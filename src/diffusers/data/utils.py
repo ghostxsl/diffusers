@@ -83,11 +83,11 @@ def i2i_collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    if 'ref_pixel_values' in examples[0]:
-        ref_pixel_values = torch.cat([example["ref_pixel_values"] for example in examples])
-        ref_pixel_values = ref_pixel_values.to(memory_format=torch.contiguous_format).float()
+    if 'reference_image' in examples[0]:
+        reference_image = torch.cat([example["reference_image"] for example in examples])
+        reference_image = reference_image.to(memory_format=torch.contiguous_format).float()
     else:
-        ref_pixel_values = torch.zeros([0])
+        reference_image = torch.zeros([0])
 
     if 'uncond' in examples[0]:
         uncond = torch.stack([example["uncond"] for example in examples])
@@ -95,10 +95,17 @@ def i2i_collate_fn(examples):
     else:
         uncond = torch.zeros([0])
 
+    if 'conditioning_pixel_values' in examples[0]:
+        conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
+        conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+    else:
+        conditioning_pixel_values = torch.zeros([0])
+
     return {
         "pixel_values": pixel_values,
-        "ref_pixel_values": ref_pixel_values,
+        "reference_image": reference_image,
         "uncond": uncond,
+        "conditioning_pixel_values": conditioning_pixel_values,
     }
 
 
@@ -125,7 +132,7 @@ def json_load(file):
 
 
 def load_file(file_path):
-    assert exists(file_path)
+    assert exists(file_path), f"File {file_path} does not exist."
 
     if splitext(file_path)[1] == ".json":
         return json_load(file_path)
@@ -286,6 +293,9 @@ def crop_human_bbox(det_bbox, img_size, crop_size=(1024, 768), pad_bbox=5):
             pad_[1][1] = x2 - w
             x2 = w
 
+        if sum(pad_[1]) == 0:
+            pad_ = None
+
         return [x1, y1, x2, y2], pad_
     elif ratio_h > ratio_w:
         # 按宽 resize
@@ -302,9 +312,12 @@ def crop_human_bbox(det_bbox, img_size, crop_size=(1024, 768), pad_bbox=5):
             pad_[0][1] = y2 - h
             y2 = h
 
+        if sum(pad_[0]) == 0:
+            pad_ = None
+
         return [x1, y1, x2, y2], pad_
     else:
-        return det_bbox, None
+        return [x1, y1, x2, y2], None
 
 
 def compute_OKS(gt_kpts, gt_bboxes, dt_kpts, kpt_thr=0.3):
