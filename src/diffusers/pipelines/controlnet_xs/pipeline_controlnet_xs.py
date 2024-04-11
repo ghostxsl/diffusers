@@ -19,10 +19,6 @@ import numpy as np
 import PIL.Image
 import torch
 import torch.nn.functional as F
-<<<<<<< HEAD:src/diffusers/pipelines/controlnet_xs/pipeline_controlnet_xs.py
-=======
-from diffusers.models.controlnetxs import ControlNetXSModel
->>>>>>> 8140b6bc5 (add controlnetxs in animate infer_stage_1):examples/research_projects/controlnetxs/pipeline_controlnet_xs.py
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 from ...callbacks import MultiPipelineCallbacks, PipelineCallback

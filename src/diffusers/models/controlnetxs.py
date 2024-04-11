@@ -786,7 +786,7 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
 
             image_embeds = added_cond_kwargs.get("image_embeds")
             encoder_hidden_states = base_model.encoder_hid_proj(encoder_hidden_states, image_embeds)
-        elif base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type == "image_proj":
+        elif base_model.encoder_hid_proj is not None and base_model.config.encoder_hid_dim_type in ["image_proj", "vip_image_proj"]:
             # Kandinsky 2.2 - style
             if "image_embeds" not in added_cond_kwargs:
                 raise ValueError(

@@ -18,6 +18,7 @@ import argparse
 import logging
 import math
 import os
+from os.path import join
 import shutil
 from pathlib import Path
 
@@ -31,7 +32,6 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from tqdm.auto import tqdm
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
-from safetensors.torch import load_file
 
 import diffusers
 from diffusers import (
@@ -40,28 +40,29 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.utils.import_utils import is_xformers_available
 from diffusers.training_utils import compute_snr, cast_training_params
-from diffusers.data import ConXSPoseDataset, i2i_collate_fn, ModelEMA
+from diffusers.utils.import_utils import is_xformers_available
+from diffusers.data import PoseTransDataset, animate_collate_fn
+from diffusers.models.reference_attention import ReferenceAttentionControl
+from diffusers.models.referencenet import ReferenceNetModel
 from diffusers.models.controlnetxs import ControlNetXSModel
+
 
 logger = get_logger(__name__)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Simple example of a ControlNetXS training script.")
+    parser = argparse.ArgumentParser(description="Simple example of a Animate training script.")
     parser.add_argument(
         "--pretrained_model_path",
         type=str,
         default=None,
         required=True,
-        help="Path to pretrained model.",
     )
     parser.add_argument(
-        "--controlnet_model_path",
+        "--referencenet_model_path",
         type=str,
         default=None,
-        help="Path to pretrained controlnet model.",
     )
     parser.add_argument(
         "--image_encoder_model_path",
@@ -76,10 +77,9 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="controlnet-model",
+        default="animate_model",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
         "--dataset_file",
         type=str,
@@ -118,16 +118,22 @@ def parse_args():
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0.1.",
     )
     parser.add_argument(
-        "--resolution",
+        "--seed",
         type=int,
-        default=768,
+        default=None,
+        help="A seed for reproducible training."
+    )
+    parser.add_argument(
+        "--resolution",
+        type=str,
+        default="768x576",
         help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
-            " resolution"
+            "The resolution(h x w) for input images, all the images in the train"
+            " dataset will be resized to this resolution"
         ),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=12, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -177,7 +183,7 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
+        default=1e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -276,22 +282,29 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--use_ema",
-        action="store_true",
-        default=False,
+        "--matting_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the matting data."
+        ),
     )
     parser.add_argument(
-        "--ema_decay",
-        type=float,
-        default=0.9998,
+        "--use_matting",
+        action="store_true",
+        help=(
+            "Whether or not to use matting data to train."
+        ),
     )
 
     args = parser.parse_args()
 
-    if args.resolution % 8 != 0:
-        raise ValueError(
-            "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
-        )
+    if len(args.resolution.split("x")) == 1:
+        args.resolution = int(args.resolution)
+    elif len(args.resolution.split("x")) == 2:
+        args.resolution = [int(r) for r in args.resolution.split("x")]
+    else:
+        raise Exception(f"Error `resolution` type({type(args.resolution)}): {args.resolution}.")
 
     return args
 
@@ -299,11 +312,12 @@ def parse_args():
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-
+    # kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         project_config=accelerator_project_config,
+        # kwargs_handlers=[kwargs],
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -335,21 +349,27 @@ def main(args):
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
 
-                model.save_pretrained(os.path.join(output_dir, "controlnet"))
-
-                if args.use_ema:
-                    model.save_config(os.path.join(output_dir, "ema"))
-                    ema_model.save_model(os.path.join(output_dir, "ema"))
+                if isinstance(model, ControlNetXSModel):
+                    sub_dir = "controlnet"
+                elif isinstance(model, ReferenceNetModel):
+                    sub_dir = "referencenet"
+                else:
+                    sub_dir = "unet"
+                model.save_pretrained(join(output_dir, sub_dir))
 
     def load_model_hook(models, input_dir):
         while len(models) > 0:
             # pop models so that they are not loaded again
             model = models.pop()
 
-            # load diffusers style into model
-            load_model = ControlNetXSModel.from_pretrained(input_dir, subfolder="controlnet")
+            if isinstance(model, ControlNetXSModel):
+                # load diffusers style into model
+                load_model = ControlNetXSModel.from_pretrained(input_dir, subfolder="controlnet")
+            elif isinstance(model, ReferenceNetModel):
+                load_model = ReferenceNetModel.from_pretrained(input_dir, subfolder="referencenet")
+            else:
+                load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
             model.register_to_config(**load_model.config)
-
             model.load_state_dict(load_model.state_dict())
             del load_model
 
@@ -377,13 +397,15 @@ def main(args):
     else:
         vae = AutoencoderKL.from_pretrained(args.pretrained_model_path, subfolder="vae")
 
-    # Move vae and image_encoder to device and cast to weight_dtype
     image_encoder.requires_grad_(False)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.requires_grad_(False)
+
+    # Move vae and image_encoder to device and cast to weight_dtype
+    image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
 
-    # Load scheduler,  and models
+    # Load scheduler and models
+    # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=1000,
         beta_start=0.00085,
@@ -394,18 +416,22 @@ def main(args):
         timestep_spacing="trailing",
         rescale_betas_zero_snr=True,
     )
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_path, subfolder="unet"
-    )
+    unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_path, subfolder="unet")
+    controlnet = ControlNetXSModel.from_pretrained(args.pretrained_model_path, subfolder="controlnet")
+
     unet.requires_grad_(False)
     unet.to(accelerator.device, dtype=weight_dtype)
 
-    if args.controlnet_model_path:
-        logger.info("Loading existing controlnet weights")
-        controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path)
+    controlnet.requires_grad_(False)
+    controlnet.to(accelerator.device, dtype=weight_dtype)
+
+    # Load ReferenceNet
+    if args.referencenet_model_path:
+        logger.info("Loading existing referencenet weights")
+        referencenet = ReferenceNetModel.from_pretrained(args.referencenet_model_path)
     else:
-        logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetXSModel.init_original(unet, is_sdxl=False)
+        logger.info("Initializing referencenet")
+        referencenet = ReferenceNetModel.from_pretrained(args.pretrained_model_path, subfolder="referencenet")
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -422,18 +448,8 @@ def main(args):
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
-
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all model weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
-
-    if accelerator.unwrap_model(controlnet).dtype != torch.float32:
-        raise ValueError(
-            f"Controlnet loaded as datatype {accelerator.unwrap_model(controlnet).dtype}. {low_precision_error_string}"
-        )
+        unet.enable_gradient_checkpointing()
+        referencenet.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -459,8 +475,9 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
+    params_to_optimize = list(referencenet.parameters())
     optimizer = optimizer_class(
-        controlnet.parameters(),
+        params_to_optimize,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -468,7 +485,7 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = ConXSPoseDataset(
+    train_dataset = PoseTransDataset(
         dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
         condition_data_dir=args.condition_data_dir,
@@ -476,17 +493,21 @@ def main(args):
         img_size=args.resolution,
         prob_uncond=args.prob_uncond,
         use_vos=args.use_vos,
+        matting_data_dir=args.matting_data_dir,
+        use_matting=args.use_matting,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=i2i_collate_fn,
+        collate_fn=animate_collate_fn,
         num_workers=args.dataloader_num_workers,
         drop_last=True,
         pin_memory=True,
     )
+
+    reference_control_reader = ReferenceAttentionControl(unet, fusion_blocks='full')
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -505,12 +526,9 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
+    referencenet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        referencenet, optimizer, train_dataloader, lr_scheduler
     )
-
-    if args.use_ema and accelerator.is_main_process:
-        ema_model = ModelEMA(accelerator.unwrap_model(controlnet), args.ema_decay)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -557,17 +575,6 @@ def main(args):
 
             initial_global_step = global_step
             first_epoch = global_step // num_update_steps_per_epoch
-
-            if args.use_ema and accelerator.is_main_process:
-                ema_path = os.path.join(args.output_dir, path, "ema", "diffusion_pytorch_model.safetensors")
-                if os.path.exists(ema_path):
-                    ema_state_dict = load_file(ema_path)
-                    ema_step = ema_state_dict.pop("step", 0)
-                    ema_step = ema_step.item() if isinstance(ema_step, torch.Tensor) else ema_step
-                    ema_model.resume(ema_state_dict, step=ema_step, device=accelerator.device)
-                    logger.info(f"Resume from ema {ema_path}")
-                else:
-                    logger.warning("No ema model resume from checkpoint.")
     else:
         initial_global_step = 0
 
@@ -579,13 +586,12 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    controlnet.train()
+    referencenet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet):
+            with accelerator.accumulate(referencenet):
                 # Convert images to latent space
-                latents = vae.encode(
-                    batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
@@ -600,20 +606,24 @@ def main(args):
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the image embedding for conditioning
-                image_embeds = image_encoder(
-                    batch["reference_image"].to(dtype=weight_dtype),
-                    output_hidden_states=True).hidden_states[-2]
-                image_embeds = image_embeds * batch["uncond"].to(dtype=weight_dtype)
-                # Get controlnet image
-                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                encoder_hidden_states = image_encoder(batch["reference_image"].to(dtype=weight_dtype)).image_embeds.unsqueeze(1)
+                encoder_hidden_states *= batch["uncond"].squeeze(-1).to(dtype=weight_dtype)
 
+                # reference image latents
+                reference_latents = vae.encode(batch["reference_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                reference_latents = reference_latents * vae.config.scaling_factor
+                reference_latents *= batch["uncond"].to(dtype=weight_dtype)
+                # run referencenet
+                referencenet(reference_latents, timesteps, encoder_hidden_states)
+                reference_control_reader.update(referencenet, dtype=weight_dtype)
+
+                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 model_pred = controlnet(
                     base_model=unet,
                     sample=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=None,
+                    encoder_hidden_states=encoder_hidden_states,
                     controlnet_cond=controlnet_image,
-                    added_cond_kwargs={'image_embeds': image_embeds},
                     return_dict=False,
                 )[0]
 
@@ -646,7 +656,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(controlnet.parameters(), args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
@@ -657,9 +667,6 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if args.use_ema:
-                        ema_model.update()
-
                     if global_step % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
@@ -695,11 +702,8 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        controlnet = accelerator.unwrap_model(controlnet)
-        controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
-
-        controlnet.save_config(os.path.join(args.output_dir, "ema"))
-        ema_model.save_model(os.path.join(args.output_dir, "ema"))
+        referencenet = accelerator.unwrap_model(referencenet)
+        referencenet.save_pretrained(os.path.join(args.output_dir, "referencenet"))
 
         noise_scheduler.save_config(os.path.join(args.output_dir, "scheduler"))
 

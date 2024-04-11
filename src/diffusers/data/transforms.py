@@ -957,12 +957,11 @@ class BoxCrop(object):
 
         if len(bboxes) == 0:
             return self.center_crop(src_img, cond_img)
-        elif len(bboxes) == 1:
-            det_bbox = np.int32(bboxes[0])
         else:
-            area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
-            ind = np.argmax(area)
-            det_bbox = np.int32(bboxes[ind])
+            det_bbox = np.int32(bboxes[0])
+            # area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+            # ind = np.argmax(area)
+            # det_bbox = np.int32(bboxes[ind])
 
         crop_bbox, pad_ = crop_human_bbox(
             det_bbox, (height, width), self.crop_size, self.pad_bbox)

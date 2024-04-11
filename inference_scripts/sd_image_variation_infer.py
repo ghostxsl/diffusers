@@ -7,6 +7,7 @@ from PIL import Image
 import torch
 
 from diffusers import AutoencoderKL, UNet2DConditionModel
+from diffusers.models.vip import SimReferenceNetModel
 from diffusers.pipelines.vip.vip_image_variation import VIPImageVariationPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 from diffusers.utils.vip_utils import *
@@ -42,14 +43,24 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--base_model_path",
+        "--unet_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/exp_animate/checkpoint-130000",
+        default="/apps/dat/cv/xsl/exp_animate/sd_i2i_new/unet",
+    )
+    parser.add_argument(
+        "--referencenet_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--scheduler_path",
+        type=str,
+        default="/apps/dat/cv/xsl/exp_animate/scheduler",
     )
     parser.add_argument(
         "--vae_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/weights/sd-image-variations/vae",
+        default="/apps/dat/cv/xsl/weights/vae_ft_mse",
     )
     parser.add_argument(
         "--image_encoder_model_path",
@@ -136,16 +147,18 @@ def main(args):
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
         args.image_encoder_model_path).to(device, dtype=dtype)
 
-    unet = UNet2DConditionModel.from_pretrained(
-        args.base_model_path, subfolder="unet").to(device, dtype=dtype)
-    scheduler = EulerAncestralDiscreteScheduler.from_pretrained(
-        args.base_model_path, subfolder="scheduler")
+    unet = UNet2DConditionModel.from_pretrained(args.unet_model_path).to(device, dtype=dtype)
+    if args.referencenet_model_path:
+        referencenet = SimReferenceNetModel.from_pretrained(args.referencenet_model_path)
+    scheduler = EulerAncestralDiscreteScheduler.from_pretrained(args.scheduler_path)
     pipe = VIPImageVariationPipeline(
         vae=vae,
         unet=unet,
         scheduler=scheduler,
         feature_extractor=CLIPImageProcessor(),
-        image_encoder=image_encoder,).to(device)
+        image_encoder=image_encoder,
+        referencenet=referencenet if args.referencenet_model_path else None,
+    ).to(device)
 
     for i, file in enumerate(ref_img_list):
         ref_img = load_image(file)

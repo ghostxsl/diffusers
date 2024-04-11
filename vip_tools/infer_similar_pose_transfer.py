@@ -120,6 +120,11 @@ def parse_args():
         default="/apps/dat/cv/xsl/exp_animate/vip_230k",
     )
     parser.add_argument(
+        "--referencenet_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
         "--vae_model_path",
         type=str,
         default="/apps/dat/cv/xsl/weights/sd-image-variations/vae",
@@ -186,8 +191,12 @@ class PoseTransfer(object):
             args.base_model_path, subfolder="unet").to(self.device, dtype=self.dtype)
         controlnet = ControlNetXSModel.from_pretrained(
             args.base_model_path, subfolder="controlnet").to(self.device, dtype=self.dtype)
-        referencenet = ReferenceNetModel.from_pretrained(
-            args.base_model_path, subfolder="referencenet").to(self.device, dtype=self.dtype)
+        if args.referencenet_model_path:
+            referencenet = ReferenceNetModel.from_pretrained(
+                args.referencenet_model_path).to(self.device, dtype=self.dtype)
+        else:
+            referencenet = ReferenceNetModel.from_pretrained(
+                args.base_model_path, subfolder="referencenet").to(self.device, dtype=self.dtype)
         scheduler = EulerAncestralDiscreteScheduler.from_pretrained(
             args.base_model_path, subfolder="scheduler")
         self.pipe_pose_trans = VIPPoseTransferPipeline(
@@ -438,7 +447,7 @@ class PoseTransfer(object):
             inter_imgs = alpha_composite(inter_imgs, image_overlay)
             restore_img = self.codeformer(inter_imgs)[0]
 
-            restore_img = remove_border(restore_img, pad_border)
+            restore_img = remove_border(restore_img.resize(pad_img.size, 1), pad_border)
             out_imgs.append(restore_img.resize(img.size, 1))
         return out_imgs
 
@@ -645,10 +654,13 @@ def main(args):
                     out_imgs = np.concatenate([out_imgs, dis_pose])
                 Image.fromarray(out_imgs).save(join(args.out_dir, splitext(name)[0] + '.jpg'))
             else:
+                if args.restore:
+                    out_imgs = restore_imgs
                 for j, (im, ind_, oks_) in enumerate(zip(out_imgs, topk_info[0], topk_info[1])):
-                    out_im = np.concatenate([ref_img, im], axis=1)
-                    Image.fromarray(out_im).save(
-                        join(args.out_dir, splitext(name)[0] + f'_{ind_}_{round(oks_, 2)}_{j}.jpg'))
+                    # out_im = np.concatenate([ref_img, im], axis=1)
+                    # Image.fromarray(out_im).save(
+                    #     join(args.out_dir, splitext(name)[0] + f'_{ind_}_{round(oks_, 2)}_{j}.jpg'))
+                    im.save(join(args.out_dir, splitext(name)[0] + f'_{j}.jpg'))
             t2 = time.time()
             print(f"time: {t2 - t1}s")
         except Exception as e:
