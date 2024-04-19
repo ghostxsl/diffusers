@@ -243,6 +243,34 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         """
         self.vae.disable_tiling()
 
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_freeu
+    def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
+        r"""Enables the FreeU mechanism as in https://arxiv.org/abs/2309.11497.
+
+        The suffixes after the scaling factors represent the stages where they are being applied.
+
+        Please refer to the [official repository](https://github.com/ChenyangSi/FreeU) for combinations of the values
+        that are known to work well for different pipelines such as Stable Diffusion v1, v2, and Stable Diffusion XL.
+
+        Args:
+            s1 (`float`):
+                Scaling factor for stage 1 to attenuate the contributions of the skip features. This is done to
+                mitigate "oversmoothing effect" in the enhanced denoising process.
+            s2 (`float`):
+                Scaling factor for stage 2 to attenuate the contributions of the skip features. This is done to
+                mitigate "oversmoothing effect" in the enhanced denoising process.
+            b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
+            b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
+        """
+        if not hasattr(self, "unet"):
+            raise ValueError("The pipeline must have `unet` for using FreeU.")
+        self.unet.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
+
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_freeu
+    def disable_freeu(self):
+        """Disables the FreeU mechanism if enabled."""
+        self.unet.disable_freeu()
+
     def enable_sequential_cpu_offload(self, gpu_id=0):
         r"""
         Offloads all models to CPU using accelerate, significantly reducing memory usage. When called, unet,
@@ -387,20 +415,16 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
             dtype,
             do_classifier_free_guidance=False
     ):
-        uncond_image_embeds = None
-        if do_classifier_free_guidance:
-            uncond_image = Image.new("RGB", image.size)
-
+        if image is None:
+            image = Image.new("RGB", (224, 224))
         image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
         image = image.to(device=device, dtype=dtype)
         image_embeds = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
         image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
 
+        uncond_image_embeds = None
         if do_classifier_free_guidance:
-            uncond_image = self.feature_extractor(images=uncond_image, return_tensors="pt").pixel_values
-            uncond_image = uncond_image.to(device=device, dtype=dtype)
-            uncond_image_embeds = self.image_encoder(uncond_image, output_hidden_states=True).hidden_states[-2]
-            uncond_image_embeds = uncond_image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+            uncond_image_embeds = torch.zeros_like(image_embeds)
 
         return image_embeds, uncond_image_embeds
 
@@ -820,6 +844,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
         padding_prompt: bool = False,
+        class_labels: int = None,
         **kwargs
     ):
         r"""
@@ -1017,8 +1042,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
         )
 
         # 6.1 Add image embeds for IP-Adapter
-        image_embeds, uncond_image_embeds = None, None
-        if ip_adapter_image is not None:
+        if self.image_encoder is not None:
             image_embeds, uncond_image_embeds = self.encode_image(
                 ip_adapter_image,
                 num_images_per_prompt,
@@ -1026,6 +1050,15 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                 prompt_embeds_dtype,
                 do_classifier_free_guidance,
             )
+            if ip_adapter_image is None:
+                image_embeds = torch.zeros_like(image_embeds)
+                uncond_image_embeds = torch.zeros_like(uncond_image_embeds)
+
+        # 6.2 Add class embeddings
+        if self.unet.class_embedding is not None and class_labels is not None:
+            class_labels = torch.LongTensor([class_labels])
+            class_labels = class_labels.repeat_interleave(num_images_per_prompt, dim=0)
+            class_labels = class_labels.to(device=device)
 
         # 7. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
@@ -1122,7 +1155,7 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                         t,
                         encoder_hidden_states=prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
-                        added_cond_kwargs={'image_embeds': image_embeds} if ip_adapter_image is not None else None,
+                        added_cond_kwargs={'image_embeds': [image_embeds.unsqueeze(1)]} if self.image_encoder is not None else None,
                         down_block_additional_residuals=down_block_res_samples,
                         mid_block_additional_residual=mid_block_res_sample,
                         return_dict=False,
@@ -1134,9 +1167,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                         t,
                         encoder_hidden_states=negative_prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
-                        added_cond_kwargs={'image_embeds': uncond_image_embeds} if ip_adapter_image is not None else None,
+                        added_cond_kwargs={'image_embeds': [uncond_image_embeds.unsqueeze(1)]} if self.image_encoder is not None else None,
                         down_block_additional_residuals=down_block_res_samples[0],
                         mid_block_additional_residual=mid_block_res_sample[0],
+                        class_labels=class_labels if self.unet.class_embedding is not None else None,
                         return_dict=False,
                     )[0]
                     noise_pred_pos = self.unet(
@@ -1144,9 +1178,10 @@ class VIPStableDiffusionControlNetInpaintPipeline(DiffusionPipeline, TextualInve
                         t,
                         encoder_hidden_states=prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
-                        added_cond_kwargs={'image_embeds': image_embeds} if ip_adapter_image is not None else None,
+                        added_cond_kwargs={'image_embeds': [image_embeds.unsqueeze(1)]} if self.image_encoder is not None else None,
                         down_block_additional_residuals=down_block_res_samples[1],
                         mid_block_additional_residual=mid_block_res_sample[1],
+                        class_labels=class_labels if self.unet.class_embedding is not None else None,
                         return_dict=False,
                     )[0]
                     noise_pred = torch.cat([noise_pred_neg, noise_pred_pos])

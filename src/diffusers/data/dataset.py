@@ -31,11 +31,14 @@ from diffusers.utils.vip_utils import load_image
 from .vos_client import VOSClient
 
 
+Image.MAX_IMAGE_PIXELS = None
+
+
 __all__ = [
     'T2IDataset', 'ControlNetDataset', 'FaceDataset',
     'ConDepthDataset', 'ConPoseDataset', 'ConCannyDataset',
     'AnimateDataset', 'PoseTransDataset', 'ImageVariationDataset',
-    'ConXSPoseDataset',
+    'ConXSPoseDataset', 'IPAPoseTransDataset',
 ]
 
 
@@ -944,17 +947,20 @@ class ImageVariationDataset(torch.utils.data.Dataset):
 
         self.image_transforms = tv_transforms.Compose(
             [
-                Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
-                RandomCrop(img_size),
+                RandomSelects([
+                    tv_transforms.Compose([
+                        Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                        RandomCrop(img_size),
+                    ]),
+                    ResizePad(img_size, padding=isinstance(img_size, int)),
+                ]),
                 RandomHorizontalFlip(),
             ]
         )
-        self.normalize_ = tv_transforms.Compose(
-            [
+        self.normalize_ = tv_transforms.Compose([
                 ToTensor(),
                 Normalize([0.5], [0.5], inplace=True),
-            ]
-        )
+        ])
 
     def __len__(self):
         return self._length
@@ -963,51 +969,48 @@ class ImageVariationDataset(torch.utils.data.Dataset):
         print("Loading dataset...")
         dataset_file = [a.strip() for a in dataset_file.split(',') if len(a.strip()) > 0]
 
-        out_list = []
+        out_metadata = []
         if self.use_vos:
             for file_ in dataset_file:
                 temp_list = load_file(file_)
                 if isinstance(temp_list, list):
-                    out_list.extend(load_file(file_))
+                    out_metadata.extend(temp_list)
                 elif isinstance(temp_list, dict):
-                    for k, v in tqdm(temp_list.items()):
-                        out_list.extend(v)
+                    for k, v in temp_list.items():
+                        out_metadata.extend(v)
                 else:
                     raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
         else:
             train_data_dir = [a.strip() for a in train_data_dir.split(',') if len(a.strip()) > 0]
-            for file_, tdir in zip(dataset_file, train_data_dir):
+
+            for i, file_ in enumerate(dataset_file):
                 temp_list = load_file(file_)
                 for name, caption in tqdm(temp_list):
-                    out_list.append({
-                        "image": join(tdir, name),
+                    img_path = join(train_data_dir[i], name)
+                    out_metadata.append({
+                        "image": img_path,
                         "caption": caption,
                     })
 
-        return out_list
+        return out_metadata
 
-    def get_data(self, item):
+    def get_item_data(self, item):
         img = item["image"]
         if self.use_vos:
             img = self.vos.download_vos_pil(img)
         img = load_image(img)
-        data = {
-            "image": img,
-            "reference_image": img.copy(),
-        }
-        return data
+        return img
 
     def __getitem__(self, index):
         example = {}
         item = self.metadata[index]
+        img = self.get_item_data(item)
+        img = self.image_transforms(img)
+        example["pixel_values"] = self.normalize_(img.copy())
 
-        data = self.get_data(item)
-        data = self.image_transforms(data)
-
-        example["pixel_values"] = self.normalize_(data["image"])
         if self.clip_processor is not None:
             example["reference_image"] = self.clip_processor(
-                images=data["reference_image"], return_tensors="pt").pixel_values
+                images=img, return_tensors="pt").pixel_values
 
             example["uncond"] = torch.tensor(
                 [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
@@ -1043,8 +1046,13 @@ class ConXSPoseDataset(torch.utils.data.Dataset):
             [
                 Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
                 DrawPose(),
-                RandomCrop(img_size),
-                RandomHorizontalFlip(),
+                RandomSelects([
+                    tv_transforms.Compose([
+                        Resize(img_size, interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                        RandomCrop(img_size),
+                    ]),
+                    ResizePad(img_size, padding=isinstance(img_size, int)),
+                ]),
             ]
         )
         self.to_tensor = ToTensor()
@@ -1061,7 +1069,13 @@ class ConXSPoseDataset(torch.utils.data.Dataset):
         if self.use_vos:
             for file_ in dataset_file:
                 temp_list = load_file(file_)
-                out.extend(temp_list)
+                if isinstance(temp_list, list):
+                    out.extend(temp_list)
+                elif isinstance(temp_list, dict):
+                    for k, v in temp_list.items():
+                        out.extend(v)
+                else:
+                    raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
         else:
             train_data_dir = [d.strip() for d in train_data_dir.split(',') if len(d.strip()) > 0]
             condition_data_dir = [d.strip() for d in condition_data_dir.split(',') if len(d.strip()) > 0]
@@ -1105,5 +1119,202 @@ class ConXSPoseDataset(torch.utils.data.Dataset):
 
             example["uncond"] = torch.tensor(
                 [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
+
+        return example
+
+
+class IPAPoseTransDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_file,
+            train_data_dir,
+            condition_data_dir=None,
+            clip_processor=None,
+            tokenizer=None,
+            img_size=512,
+            prob_uncond=0.1,
+            use_vos=False,
+    ):
+        if prob_uncond < 0. or prob_uncond > 1.:
+            raise ValueError("`prob_uncond` must be in the range [0., 1.].")
+
+        self.clip_processor = clip_processor
+        self.tokenizer = tokenizer
+        self.prob_uncond = prob_uncond
+        self.use_vos = use_vos
+
+        if tokenizer is not None:
+            self.empty_text_input_ids = tokenizer(
+                "", max_length=tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt").input_ids
+
+        self.metadata = self.get_metadata(dataset_file, train_data_dir, condition_data_dir)
+        self.item_list = []
+        for k, items in tqdm(self.metadata.items()):
+            self.item_list.extend([(k, item) for item in items])
+        self._length = len(self.item_list)
+
+        if use_vos:
+            self.vos = VOSClient()
+
+        self.image_transforms = tv_transforms.Compose(
+            [
+                DrawPose(img_size),
+                RandomSelects([
+                    tv_transforms.Compose([
+                        RandomResize(
+                            img_size,
+                            [img_size, int(img_size * 1.625)],
+                            prob=0.5,
+                            interpolation=tv_transforms.InterpolationMode.LANCZOS),
+                        RandomCrop(img_size, fill=255),
+                    ]),
+                    ResizePad(img_size),
+                ]),
+                ToTensor(),
+            ]
+        )
+        self.reference_transforms = tv_transforms.Compose(
+            [
+                HumanCrop(prob=1 - prob_uncond, random_crop=True),
+                RandomHorizontalFlip(),
+            ]
+        )
+        self.normalize_ = Normalize([0.5], [0.5], inplace=True)
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file, train_data_dir, condition_data_dir):
+        print("Loading dataset...")
+        dataset_file = [a.strip() for a in dataset_file.split(',') if len(a.strip()) > 0]
+
+        out_dict = {}
+        if self.use_vos:
+            for file_ in dataset_file:
+                temp_list = load_file(file_)
+                if isinstance(temp_list, list):
+                    for item in temp_list:
+                        out_dict[get_str_md5(item["image"])] = [item]
+                elif isinstance(temp_list, dict):
+                    out_dict.update(temp_list)
+                else:
+                    raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
+        else:
+            train_data_dir = [a.strip() for a in train_data_dir.split(',') if len(a.strip()) > 0]
+            if condition_data_dir is not None:
+                condition_data_dir = [
+                    a.strip() for a in condition_data_dir.split(',') if len(a.strip()) > 0]
+
+            for i, file_ in enumerate(dataset_file):
+                temp_list = load_file(file_)
+                for name, caption in tqdm(temp_list):
+                    img_path = join(train_data_dir[i], name)
+                    pose_path = join(
+                            condition_data_dir[i], splitext(name)[0] + '.pose') if condition_data_dir is not None else None
+                    out_dict[get_str_md5(img_path)] = [{
+                        "image": img_path,
+                        "caption": caption,
+                        "pose": pose_path,
+                    }]
+
+        return out_dict
+
+    def read_image_pose_data(self, item):
+        img, pose = item["image"], item["pose"]
+        if self.use_vos:
+            img = self.vos.download_vos_pil(img)
+            pose = self.vos.download_vos_pkl(pose)
+        else:
+            pose = pkl_load(item["pose"])
+
+        img = load_image(img)
+        return img, pose
+
+    def get_text_ids(self, captions):
+        text_ids = None
+        if self.tokenizer is not None:
+            if isinstance(captions, str):
+                caption = captions
+            elif isinstance(captions, Sequence):
+                caption = random.choice(captions)
+            else:
+                raise Exception(f"Input captions type({type(captions)}) error.")
+
+            text_ids = self.tokenizer(
+                caption, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=False, return_tensors="pt"
+            ).input_ids
+            if text_ids.shape[1] > self.tokenizer.model_max_length:
+                len_text = self.tokenizer.model_max_length - 2
+                st_idx = random.randint(1, text_ids.shape[1] - 1 - len_text)
+                new_text_ids = text_ids[:, st_idx: st_idx + len_text]
+                text_ids = torch.cat([text_ids[:, 0:1], new_text_ids, text_ids[:, -1:]], dim=1)
+
+        return text_ids
+
+    def get_data(self, index):
+        group_name, item = self.item_list[index]
+        img, pose = self.read_image_pose_data(item)
+        data = {
+            "image": img,
+            "condition": pose,
+        }
+
+        # get image caption
+        text_ids = None
+        # captions = item.get("caption", "")
+        # text_ids = self.get_text_ids(captions)
+
+        # get class label
+        class_label = item.get("goods_bbox", [])
+        class_label = 1 if len(class_label) == 0 else 2
+
+        if len(self.metadata[group_name]) > 1:
+            group_list = copy.deepcopy(self.metadata[group_name])
+            group_list.remove(item)
+            ref_item = random.choice(group_list)
+
+            ref_img, ref_pose = self.read_image_pose_data(ref_item)
+            reference_data = {
+                "reference_image": ref_img,
+                "reference_condition": ref_pose,
+            }
+        else:
+            reference_data = {
+                "reference_image": img.copy(),
+                "reference_condition": copy.deepcopy(pose),
+            }
+
+        return data, reference_data, text_ids, class_label
+
+    def __getitem__(self, index):
+        example = {}
+        try:
+            data, reference_data, text_input_ids, class_label = self.get_data(index)
+        except:
+            group_name, item = self.item_list[index]
+            image_name = item["item"]
+            print(f"error read: {image_name}.")
+            index = random.randint(0, self._length - 1)
+            data, reference_data, text_input_ids, class_label = self.get_data(index)
+        data = self.image_transforms(data)
+        example["pixel_values"] = self.normalize_(data["image"])
+        example["conditioning_pixel_values"] = data["condition_image"]
+
+        example["uncond"] = torch.tensor(
+            [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
+        # class_label = torch.LongTensor([class_label])
+        # example["class_label"] = class_label
+
+        if self.clip_processor is not None:
+            reference_data = self.reference_transforms(reference_data)
+            example["reference_image"] = self.clip_processor(
+                images=reference_data["reference_image"], return_tensors="pt").pixel_values
+
+        if self.tokenizer is not None:
+            # if random.random() < self.prob_uncond:
+            #     text_input_ids = self.empty_text_input_ids
+            example["input_ids"] = self.empty_text_input_ids
 
         return example

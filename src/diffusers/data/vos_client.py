@@ -3,6 +3,7 @@ import boto3
 from PIL import Image
 from io import BytesIO
 import pickle
+import traceback
 
 __all__ = ['VOSClient']
 
@@ -36,7 +37,7 @@ class VOSClient:
         self.custom_headers = {'x-vip-force-rewrite', 'true'}
 
     @staticmethod
-    def get_pil_bytes(img, format='PNG', quality=90):
+    def get_pil_bytes(img, format='JPEG', quality=90):
         # format: JPEG, PNG, GIF
         buf = BytesIO()
         img.save(buf, format=format, quality=quality)
@@ -49,7 +50,8 @@ class VOSClient:
             )
         return f"s3://{self.bucket}/{s3_path}"
 
-    def upload_vos_pil(self, img, s3_path, format='PNG', quality=90):
+    def upload_vos_pil(self, img, s3_path, format='JPEG', quality=90):
+        # format: JPEG, PNG, GIF
         img_bytes = self.get_pil_bytes(img, format, quality=quality)
         return self.upload_vos_bytes(img_bytes, s3_path)
 
@@ -58,7 +60,11 @@ class VOSClient:
         return self.upload_vos_bytes(pkl_bytes, s3_path)
 
     def download_vos_bytes(self, s3_path):
-        s3_response_object = self.s3_client.get_object(Bucket=self.bucket, Key=s3_path)
+        try:
+            s3_response_object = self.s3_client.get_object(Bucket=self.bucket, Key=s3_path)
+        except Exception as e:
+            print(f"s3_path: {s3_path}")
+            raise Exception(traceback.format_exc())
         return s3_response_object['Body'].read()
 
     def download_vos_pil(self, s3_path):

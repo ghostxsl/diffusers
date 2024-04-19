@@ -905,7 +905,11 @@ class UNet2DConditionLoadersMixin:
                     )
         return lora_dicts
 
-    def _init_ip_adapter(self, num_image_text_embeds=16, embed_dims=1280):
+    def _init_ip_adapter_plus(self,
+                              num_image_text_embeds=16,
+                              embed_dims=1280,
+                              num_class_embeds=None,
+                              state_dict=None):
         from ..models.attention_processor import (
             AttnProcessor,
             AttnProcessor2_0,
@@ -953,6 +957,13 @@ class UNet2DConditionLoadersMixin:
             num_queries=num_image_text_embeds,
         )
 
-        unet.encoder_hid_proj = MultiIPAdapterImageProjection(
-            [image_projection.to(device=unet.device, dtype=unet.dtype)])
-        unet.config.encoder_hid_dim_type = "ip_image_proj"
+        self.encoder_hid_proj = MultiIPAdapterImageProjection(
+            [image_projection.to(device=self.device, dtype=self.dtype)])
+        self.config.encoder_hid_dim_type = "ip_image_proj"
+        self.config['encoder_hid_dim_type'] = "ip_image_proj"
+
+        if num_class_embeds is not None:
+            self.class_embedding = torch.nn.Embedding(num_class_embeds, 1280, padding_idx=0)
+
+        if state_dict is not None:
+            self.load_state_dict(state_dict, strict=False)

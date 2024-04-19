@@ -2,10 +2,11 @@ accelerate
 transformers
 einops
 av
+pillow
 safetensors
 tqdm
 pandas
 opencv-python
 matplotlib
-peft
+peft==0.10.0
 boto3

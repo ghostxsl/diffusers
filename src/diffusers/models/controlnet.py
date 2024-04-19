@@ -741,6 +741,10 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             attention_mask = (1 - attention_mask.to(sample.dtype)) * -10000.0
             attention_mask = attention_mask.unsqueeze(1)
 
+        # TODO: Hack here
+        if self.encoder_hid_proj is not None and self.config.encoder_hid_dim_type == "text_proj":
+            encoder_hidden_states = self.encoder_hid_proj(encoder_hidden_states)
+
         # 1. time
         timesteps = timestep
         if not torch.is_tensor(timesteps):

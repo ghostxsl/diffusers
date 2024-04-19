@@ -270,16 +270,6 @@ def parse_args():
             "Whether or not to use vos to train."
         ),
     )
-    parser.add_argument(
-        "--use_ema",
-        action="store_true",
-        default=False,
-    )
-    parser.add_argument(
-        "--ema_decay",
-        type=float,
-        default=0.9998,
-    )
 
     args = parser.parse_args()
 
@@ -334,10 +324,6 @@ def main(args):
                 weights.pop()
 
                 model.save_pretrained(join(output_dir, "referencenet"))
-
-                if args.use_ema:
-                    model.save_config(os.path.join(output_dir, "ema"))
-                    ema_model.save_model(os.path.join(output_dir, "ema"))
 
     def load_model_hook(models, input_dir):
         while len(models) > 0:
@@ -501,9 +487,6 @@ def main(args):
         referencenet, optimizer, train_dataloader, lr_scheduler
     )
 
-    if args.use_ema and accelerator.is_main_process:
-        ema_model = ModelEMA(accelerator.unwrap_model(referencenet), args.ema_decay)
-
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -639,9 +622,6 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if args.use_ema:
-                        ema_model.update()
-
                     if global_step % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
@@ -679,9 +659,6 @@ def main(args):
     if accelerator.is_main_process:
         referencenet = accelerator.unwrap_model(referencenet)
         referencenet.save_pretrained(os.path.join(args.output_dir, "referencenet"))
-
-        referencenet.save_config(os.path.join(args.output_dir, "ema"))
-        ema_model.save_model(os.path.join(args.output_dir, "ema"))
 
         noise_scheduler.save_config(os.path.join(args.output_dir, "scheduler"))
 

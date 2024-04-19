@@ -83,6 +83,11 @@ def i2i_collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
+    if 'input_ids' in examples[0]:
+        input_ids = torch.cat([example["input_ids"] for example in examples])
+    else:
+        input_ids = torch.zeros([0])
+
     if 'reference_image' in examples[0]:
         reference_image = torch.cat([example["reference_image"] for example in examples])
         reference_image = reference_image.to(memory_format=torch.contiguous_format).float()
@@ -101,11 +106,18 @@ def i2i_collate_fn(examples):
     else:
         conditioning_pixel_values = torch.zeros([0])
 
+    if 'class_label' in examples[0]:
+        class_label = torch.cat([example["class_label"] for example in examples])
+    else:
+        class_label = torch.zeros([0])
+
     return {
         "pixel_values": pixel_values,
         "reference_image": reference_image,
+        "input_ids": input_ids,
         "uncond": uncond,
         "conditioning_pixel_values": conditioning_pixel_values,
+        "class_label": class_label,
     }
 
 
@@ -138,6 +150,8 @@ def load_file(file_path):
         return json_load(file_path)
     elif splitext(file_path)[1] == ".csv":
         return pandas.read_csv(file_path).values.tolist()
+    elif splitext(file_path)[1] == ".xlsx":
+        return pandas.read_excel(file_path).values.tolist()
     else:
         return pkl_load(file_path)
 
