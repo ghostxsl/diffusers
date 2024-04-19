@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2023 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 # Copyright 2024 The VIP Inc. AIGC team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@ import argparse
 import logging
 import math
 import os
-from os.path import join
+from os.path import join, exists
 import shutil
 from pathlib import Path
 
@@ -31,29 +31,44 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
 from tqdm.auto import tqdm
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+from transformers import (
+    AutoTokenizer,
+    CLIPTextModel,
+    CLIPImageProcessor,
+    CLIPVisionModelWithProjection
+)
 
 import diffusers
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
     UNet2DConditionModel,
+    ControlNetModel,
 )
-from diffusers.models.embeddings import IPAdapterPlusImageProjection
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr, cast_training_params
 from diffusers.utils.import_utils import is_xformers_available
-from diffusers.data import ImageVariationDataset, i2i_collate_fn, ModelEMA
+from diffusers.data import IPAPoseTransDataset, i2i_collate_fn, ModelEMA
 
 
 logger = get_logger(__name__)
 
 
-def train_unet_cross_attn(unet):
-    for name, param in unet.named_parameters():
-        if 'attn2' in name or 'encoder_hid_proj' in name:
-            param.requires_grad = True
-    return unet
+def save_ip_adapter_state_dict(save_dir, state_dict, dtype=torch.float32):
+    if not exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+
+    ip_adapter_state_dict = {}
+    for k, v in state_dict.items():
+        if "processor" in k:
+            ip_adapter_state_dict[k] = v.to(dtype)
+        elif "encoder_hid_proj" in k:
+            ip_adapter_state_dict[k] = v.to(dtype)
+        elif "class_embedding" in k:
+            ip_adapter_state_dict[k] = v.to(dtype)
+    torch.save(ip_adapter_state_dict, join(save_dir, "ip_adapter_plus.bin"))
+
+    return ip_adapter_state_dict
 
 
 def parse_args():
@@ -65,6 +80,16 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
+        "--ip_adapter_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--controlnet_model_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
         "--image_encoder_model_path",
         type=str,
         default=None,
@@ -73,11 +98,6 @@ def parse_args():
         "--vae_model_path",
         type=str,
         default=None,
-    )
-    parser.add_argument(
-        "--train_cross_attn",
-        action="store_true",
-        help="Whether to train cross_attn",
     )
     parser.add_argument(
         "--output_dir",
@@ -102,6 +122,16 @@ def parse_args():
         default=None,
         help=(
             "A folder containing the training data. Folder contents must follow the structure described in"
+            " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
+            " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
+        ),
+    )
+    parser.add_argument(
+        "--condition_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "A folder containing the conditional training data. Folder contents must follow the structure described in"
             " https://huggingface.co/docs/datasets/image_dataset#imagefolder. In particular, a `metadata.jsonl` file"
             " must exist to provide the captions for the images. Ignored if `dataset_name` is specified."
         ),
@@ -197,7 +227,7 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=5000, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=1000, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--lr_num_cycles",
@@ -337,21 +367,28 @@ def main(args):
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
 
-                model.save_pretrained(join(output_dir, "unet"))
-
-                if args.use_ema:
-                    model.save_config(os.path.join(output_dir, "ema"))
-                    ema_model.save_model(os.path.join(output_dir, "ema"))
+                if isinstance(model, ControlNetModel):
+                    model.save_pretrained(join(output_dir, "controlnet"))
+                else:
+                    save_ip_adapter_state_dict(join(output_dir, "ip_adapter"), model.state_dict())
+                    if args.use_ema:
+                        save_ip_adapter_state_dict(join(output_dir, "ema"), ema_model.state_dict)
 
     def load_model_hook(models, input_dir):
         while len(models) > 0:
             # pop models so that they are not loaded again
             model = models.pop()
 
-            load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
-            model.register_to_config(**load_model.config)
-            model.load_state_dict(load_model.state_dict())
-            del load_model
+            if isinstance(model, ControlNetModel):
+                load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                model.register_to_config(**load_model.config)
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+            else:
+                # load ip_adapter
+                ip_adapter_state_dict = torch.load(
+                    join(input_dir, "ip_adapter", "ip_adapter_plus.bin"))
+                model.load_state_dict(ip_adapter_state_dict, strict=False)
 
     accelerator.register_save_state_pre_hook(save_model_hook)
     accelerator.register_load_state_pre_hook(load_model_hook)
@@ -363,6 +400,26 @@ def main(args):
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
+
+    # Load the tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.pretrained_model_path,
+        subfolder="tokenizer",
+        use_fast=False,
+    )
+    # import correct text encoder class
+    text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_path, subfolder="text_encoder")
+
+    # TODO: hack empty text inputs here
+    empty_text_input_ids = tokenizer(
+        "", max_length=tokenizer.model_max_length,
+        padding="max_length", truncation=True, return_tensors="pt"
+    ).input_ids
+    encoder_hidden_states = text_encoder(empty_text_input_ids)[0].repeat_interleave(
+        repeats=args.train_batch_size, dim=0)
+    encoder_hidden_states = encoder_hidden_states.to(accelerator.device, dtype=weight_dtype)
+    del tokenizer
+    del text_encoder
 
     # import correct image encoder class
     feature_extractor = CLIPImageProcessor()
@@ -385,46 +442,35 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
 
     # Load scheduler and models
-    # noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
-        beta_start=0.00085,
-        beta_end=0.012,
-        beta_schedule="linear",
-        clip_sample=False,
-        prediction_type="v_prediction",
-        timestep_spacing="trailing",
-        rescale_betas_zero_snr=True,
-    )
+    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_path, subfolder="scheduler")
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_path,
-        subfolder="unet",
+        args.pretrained_model_path, subfolder="unet",
     )
+    unet.requires_grad_(False)
+    # unet.config["num_class_embeds"] = 10
+    # unet.class_embedding = torch.nn.Embedding(
+    #     unet.config["num_class_embeds"], 1280, padding_idx=0)
 
-    if args.train_cross_attn:
-        unet.encoder_hid_dim_type = "vip_image_proj"
-        unet.encoder_hid_dim = image_encoder.config.hidden_size
-
-        unet.config.encoder_hid_dim_type = "vip_image_proj"
-        unet.config['encoder_hid_dim_type'] = "vip_image_proj"
-        unet.config.encoder_hid_dim = image_encoder.config.hidden_size
-        unet.config['encoder_hid_dim'] = image_encoder.config.hidden_size
-
-        # convert IP-Adapter Image Projection layers to diffusers
-        image_projection = IPAdapterPlusImageProjection(
+    # Add IP-Adapter
+    if args.ip_adapter_model_path is not None:
+        # ip_adapter_state_dict = torch.load(args.ip_adapter_model_path, map_location='cpu')
+        # unet._load_ip_adapter_weights(ip_adapter_state_dict)
+        unet._init_ip_adapter_plus(
             embed_dims=image_encoder.config.hidden_size,
-            output_dims=unet.config.cross_attention_dim,
-            hidden_dims=unet.config.cross_attention_dim,
-            heads=12,
-            num_queries=32,
+            state_dict=torch.load(args.ip_adapter_model_path, map_location='cpu'),
         )
-        unet.encoder_hid_proj = image_projection.to(device=accelerator.device, dtype=weight_dtype)
+    else:
+        unet._init_ip_adapter_plus(embed_dims=image_encoder.config.hidden_size)
 
-    # Move vae, unet to device and cast to weight_dtype
-    if args.train_cross_attn:
-        unet.requires_grad_(False)
-        train_unet_cross_attn(unet)
-        cast_training_params(unet)
+    # Load ControlNet
+    if args.controlnet_model_path:
+        logger.info("Loading existing controlnet weights")
+        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_path)
+    else:
+        logger.info("Initializing controlnet weights")
+        controlnet = ControlNetModel.from_unet(unet)
+
+    cast_training_params(unet)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -436,6 +482,7 @@ def main(args):
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
+            controlnet.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
@@ -466,7 +513,12 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = [p for p in unet.parameters() if p.requires_grad]
+    ipa_params = [p for p in unet.parameters() if p.requires_grad]
+    params_to_clip = ipa_params + list(controlnet.parameters())
+    params_to_optimize = [
+        {"params": ipa_params},
+        {"params": list(controlnet.parameters()), "lr": 5e-6}
+    ]
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -476,9 +528,10 @@ def main(args):
     )
 
     # Dataset and DataLoaders creation:
-    train_dataset = ImageVariationDataset(
+    train_dataset = IPAPoseTransDataset(
         dataset_file=args.dataset_file,
         train_data_dir=args.train_data_dir,
+        condition_data_dir=args.condition_data_dir,
         clip_processor=feature_extractor,
         img_size=args.resolution,
         prob_uncond=args.prob_uncond,
@@ -512,8 +565,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet, optimizer, train_dataloader, lr_scheduler
     )
 
     if args.use_ema and accelerator.is_main_process:
@@ -576,9 +629,10 @@ def main(args):
     )
 
     unet.train()
+    controlnet.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate(unet, controlnet):
                 # Convert images to latent space
                 latents = vae.encode(
                     batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
@@ -601,11 +655,24 @@ def main(args):
                     output_hidden_states=True).hidden_states[-2]
                 image_embeds = image_embeds * batch["uncond"].to(dtype=weight_dtype)
 
+                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                down_block_res_samples, mid_block_res_sample = controlnet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states.detach(),
+                    controlnet_cond=controlnet_image,
+                    return_dict=False,
+                )
+
                 model_pred = unet(
                     sample=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=None,
-                    added_cond_kwargs={'image_embeds': image_embeds},
+                    encoder_hidden_states=encoder_hidden_states.detach(),
+                    added_cond_kwargs={'image_embeds': [image_embeds.unsqueeze(1)]},
+                    down_block_additional_residuals=[
+                        s.to(dtype=weight_dtype) for s in down_block_res_samples
+                    ],
+                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                     return_dict=False,
                 )[0]
 
@@ -638,7 +705,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_optimize, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=args.set_grads_to_none)
@@ -688,13 +755,12 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        unet.save_pretrained(os.path.join(args.output_dir, "unet"))
-
-        noise_scheduler.save_config(os.path.join(args.output_dir, "scheduler"))
-
+        save_ip_adapter_state_dict(join(args.output_dir, "ip_adapter"), unet.state_dict())
         if args.use_ema:
-            unet.save_config(os.path.join(args.output_dir, "ema"))
-            ema_model.save_model(os.path.join(args.output_dir, "ema"))
+            save_ip_adapter_state_dict(join(args.output_dir, "ema"), ema_model.state_dict)
+
+        controlnet = accelerator.unwrap_model(controlnet)
+        controlnet.save_pretrained(os.path.join(args.output_dir, "controlnet"))
 
     accelerator.end_training()
 

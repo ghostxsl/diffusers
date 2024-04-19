@@ -23,6 +23,9 @@ import torch
 from .torch_utils import randn_tensor
 
 
+Image.MAX_IMAGE_PIXELS = None
+
+
 __all__ = [
     'get_fixed_seed', 'load_image', 'mask_process', 'create_random_tensors',
     'mediapipe_face_detection', 'get_crop_region', 'expand_crop_region',
@@ -45,11 +48,16 @@ def load_image(image_path):
         raise ValueError(
             "Incorrect format used for image. Should be a local path to an image, or a PIL image."
         )
+
     image = ImageOps.exif_transpose(image)
     if image.mode == "RGBA":
         # returning an RGB mode image with no transparency
         image = Image.fromarray(np.array(image)[..., :3])
     elif image.mode != "RGB":
+        # Fix UserWarning for palette images with transparency
+        if "transparency" in image.info:
+            image = image.convert("RGBA")
+            image = Image.fromarray(np.array(image)[..., :3])
         image = image.convert("RGB")
 
     return image

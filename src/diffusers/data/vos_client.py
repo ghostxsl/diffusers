@@ -50,6 +50,7 @@ class VOSClient:
         return f"s3://{self.bucket}/{s3_path}"
 
     def upload_vos_pil(self, img, s3_path, format='PNG', quality=90):
+        # format: JPEG, PNG, GIF
         img_bytes = self.get_pil_bytes(img, format, quality=quality)
         return self.upload_vos_bytes(img_bytes, s3_path)
 

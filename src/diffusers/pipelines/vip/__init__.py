@@ -3,3 +3,5 @@ from .vip_animate_video import VIPAnimateVideoPipeline
 from .vip_image_variation import VIPImageVariationPipeline
 from .vip_pose_transfer import VIPPoseTransferPipeline
 from .vip_pixel_pose_transfer import VIPPixelPoseTransferPipeline
+from .vip_ip_adapter_pose_transfer import VIPIPAPoseTransferPipeline
+from .vip_sdiv_controlnetxs import VIPIVControlNetXSPipeline

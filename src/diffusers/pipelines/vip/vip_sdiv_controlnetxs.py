@@ -1,5 +1,5 @@
-# Copyright 2023 The HuggingFace Team. All rights reserved.
-# Copyright 2023 The VIP AIGC Team. All rights reserved.
+# Copyright 2024 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The VIP AIGC Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,15 +16,14 @@
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import numpy as np
 import torch
-from torchvision.transforms import ToTensor, Normalize
+from torchvision.transforms import ToTensor, Normalize, Compose
 from PIL import Image
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...image_processor import VaeImageProcessor
 from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin, IPAdapterMixin
-from ...models import AutoencoderKL, UNet2DConditionModel, ControlNetModel
+from ...models import AutoencoderKL, UNet2DConditionModel
 from ...schedulers import (
     DDIMScheduler,
     DPMSolverMultistepScheduler,
@@ -33,11 +32,10 @@ from ...schedulers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
 )
-from ...utils import USE_PEFT_BACKEND, logging
+from ...utils import logging
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
-from diffusers.models.reference_attention import ReferenceAttentionControl
-from diffusers.models.vip import SimReferenceNetModel
+from diffusers.models.controlnetxs import ControlNetXSModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -59,8 +57,8 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
-    model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
+class VIPIVControlNetXSPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, IPAdapterMixin):
+    model_cpu_offload_seq = "image_encoder->unet->vae"
 
     def __init__(
         self,
@@ -76,7 +74,7 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
         ],
         feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection,
-        referencenet: SimReferenceNetModel = None,
+        controlnet: ControlNetXSModel,
     ):
         super().__init__()
 
@@ -86,14 +84,17 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             scheduler=scheduler,
             feature_extractor=feature_extractor,
             image_encoder=image_encoder,
+            controlnet=controlnet,
         )
-        self.referencenet = None
-        if referencenet is not None:
-            self.register_modules(referencenet=referencenet)
-            self.reference_control_reader = ReferenceAttentionControl(self.unet, fusion_blocks='full')
-
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.control_image_processor = VaeImageProcessor(
+            vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
+        )
+        self.normalize_ = Compose([
+            ToTensor(),
+            Normalize([0.5], [0.5], inplace=True),
+        ])
 
     def encode_image(self, image, device, num_images_per_prompt, do_classifier_free_guidance=False):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -191,7 +192,16 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
-    # Copied from diffusers.pipelines.text_to_video_synthesis.pipeline_text_to_video_synth.TextToVideoSDPipeline.prepare_latents
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.StableDiffusionImg2ImgPipeline.get_timesteps
+    def get_timesteps(self, num_inference_steps, strength):
+        # get the original timestep using init_timestep
+        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
+
+        t_start = max(num_inference_steps - init_timestep, 0)
+        timesteps = self.scheduler.timesteps[t_start * self.scheduler.order:]
+
+        return timesteps, num_inference_steps - t_start
+
     def prepare_latents(
         self, batch_size, num_channels_latents, height, width, dtype, device, generator
     ):
@@ -228,21 +238,45 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
 
         return image_latents
 
+    # Copied from diffusers.pipelines.controlnet.pipeline_controlnet.StableDiffusionControlNetPipeline.prepare_image
+    def prepare_control_image(
+        self,
+        image,
+        width,
+        height,
+        num_images_per_prompt,
+        device,
+        dtype,
+        do_classifier_free_guidance=False,
+    ):
+        image = self.control_image_processor.preprocess(
+            image, height=height, width=width).to(dtype=torch.float32)
+        image = image.repeat_interleave(num_images_per_prompt, dim=0)
+        image = image.to(device=device, dtype=dtype)
+
+        if do_classifier_free_guidance:
+            image = torch.cat([image] * 2)
+
+        return image
+
     @torch.no_grad()
     def __call__(
         self,
         image: Image.Image = None,
+        control_image: Image.Image = None,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: int = 25,
-        guidance_scale: float = 6.5,
+        guidance_scale: float = 4.5,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        cond_scale: float = 1.0,
         output_type: Optional[str] = "pil",
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = {},
+        **kwargs
     ):
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
@@ -250,7 +284,7 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        # 1. Prepare image embedding and reference latents
+        # 1. Prepare image embedding
         image_embeds, uncond_image_embeds = self.encode_image(
             image,
             device,
@@ -263,22 +297,22 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             image_embeds = torch.zeros_like(image_embeds)
         dtype = image_embeds.dtype
 
-        # 1.2 Prepare reference image latents
-        if self.referencenet is not None:
-            ref_img = image if image is not None else Image.new("RGB", (width, height))
-            reference_image = self.image_processor.preprocess(ref_img).to(device, dtype=dtype)
-            reference_latents = self._encode_vae_image(reference_image, generator)
-            if do_classifier_free_guidance:
-                reference_latents = torch.cat([
-                    torch.zeros_like(reference_latents), reference_latents])
-            if image is None:
-                reference_latents = torch.zeros_like(reference_latents)
+        # 2. Prepare control image
+        control_image = self.prepare_control_image(
+            control_image,
+            width,
+            height,
+            num_images_per_prompt,
+            device,
+            dtype,
+            do_classifier_free_guidance
+        )
 
-        # 2. Prepare timesteps
+        # 3. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 3. Prepare latent variables
+        # 4. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
         latents = self.prepare_latents(
             num_images_per_prompt,
@@ -287,10 +321,10 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
             width,
             dtype,
             device,
-            generator,
+            generator
         )
 
-        # 4. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # Denoising loop
@@ -301,16 +335,15 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                if self.referencenet is not None:
-                    self.referencenet(reference_latents, t)
-                    self.reference_control_reader.update(self.referencenet, dtype=dtype)
-
                 # predict the noise residual
-                noise_pred = self.unet(
+                noise_pred = self.controlnet(
+                    base_model=self.unet,
                     sample=latent_model_input,
                     timestep=t,
                     encoder_hidden_states=None,
                     added_cond_kwargs={'image_embeds': image_embeds},
+                    controlnet_cond=control_image,
+                    conditioning_scale=cond_scale,
                     cross_attention_kwargs=cross_attention_kwargs,
                     return_dict=False,
                 )[0]
@@ -322,18 +355,6 @@ class VIPImageVariationPipeline(DiffusionPipeline, TextualInversionLoaderMixin, 
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                # # compute predicted original sample (x_0) from sigma-scaled predicted noise
-                # pred_original_sample = self.scheduler.get_pred_original_sample(
-                #     noise_pred, t, torch.cat([latents] * 2) if do_classifier_free_guidance else latents)
-                #
-                # # perform guidance
-                # if do_classifier_free_guidance:
-                #     noise_pred_uncond, noise_pred_text = pred_original_sample.chunk(2)
-                #     pred_original_sample = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                #
-                # # compute the previous noisy sample x_t -> x_t-1
-                # latents = self.scheduler.webui_step(pred_original_sample, t, latents, **extra_step_kwargs)
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):

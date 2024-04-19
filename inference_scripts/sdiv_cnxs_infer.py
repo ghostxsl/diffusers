@@ -7,11 +7,15 @@ from PIL import Image
 import torch
 
 from diffusers import AutoencoderKL, UNet2DConditionModel
-from diffusers.models.vip import SimReferenceNetModel
-from diffusers.pipelines.vip.vip_image_variation import VIPImageVariationPipeline
+from diffusers.models.controlnetxs import ControlNetXSModel
+from diffusers.pipelines.vip.vip_sdiv_controlnetxs import VIPIVControlNetXSPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 from diffusers.utils.vip_utils import *
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+
+from aistudio.utils.loader import ROOT_DIR
+from aistudio.extensions.HumanPose import HumanPose
+from aistudio.extensions.HumanPose.utils import POSE_CONFIG_DIR
 
 
 def parse_args():
@@ -45,10 +49,10 @@ def parse_args():
     parser.add_argument(
         "--unet_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/exp_animate/sdiv_290k/unet",
+        default="/apps/dat/cv/xsl/exp_animate/sd_i2i_new/unet",
     )
     parser.add_argument(
-        "--referencenet_model_path",
+        "--controlnet_model_path",
         type=str,
         default=None,
     )
@@ -67,6 +71,11 @@ def parse_args():
         type=str,
         default="/apps/dat/cv/xsl/weights/IP-Adapter/image_encoder",
     )
+    parser.add_argument(
+        "--weight_dir",
+        default=None,
+        type=str,
+        help="Directory to weights.")
 
     parser.add_argument(
         "--device",
@@ -148,18 +157,28 @@ def main(args):
         args.image_encoder_model_path).to(device, dtype=dtype)
 
     unet = UNet2DConditionModel.from_pretrained(args.unet_model_path).to(device, dtype=dtype)
-    if args.referencenet_model_path:
-        referencenet = SimReferenceNetModel.from_pretrained(
-            args.referencenet_model_path).to(device, dtype=dtype)
-    scheduler = EulerAncestralDiscreteScheduler.from_pretrained(args.scheduler_path)
-    pipe = VIPImageVariationPipeline(
+    controlnet = ControlNetXSModel.from_pretrained(args.controlnet_model_path).to(device, dtype=dtype)
+    scheduler = KDPMPP2MDiscreteScheduler.from_pretrained(args.scheduler_path)
+    pipe = VIPIVControlNetXSPipeline(
         vae=vae,
         unet=unet,
         scheduler=scheduler,
         feature_extractor=CLIPImageProcessor(),
         image_encoder=image_encoder,
-        referencenet=referencenet if args.referencenet_model_path else None,
+        controlnet=controlnet,
     ).to(device)
+
+    pose_infer = HumanPose(
+        det_cfg=join(POSE_CONFIG_DIR, "rtmdet_l_8xb32-300e_coco.py"),
+        det_pth=join(args.weight_dir, "extensions/rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth"),
+        bodypose_cfg=join(POSE_CONFIG_DIR, "rtmpose-l_8xb256-420e_body8-256x192.py"),
+        bodypose_pth=join(args.weight_dir,
+                          "extensions/rtmpose-l_simcc-body7_pt-body7_420e-256x192-4dba18fc_20230504.pth"),
+        wholebodypose_cfg=join(POSE_CONFIG_DIR, "dwpose_l_wholebody_384x288.py"),
+        wholebodypose_pth=join(args.weight_dir, "extensions/dw-ll_ucoco_384.pth"),
+        device=device,
+        bbox_thr=0.2,
+    )
 
     for i, file in enumerate(ref_img_list):
         ref_img = load_image(file)
@@ -168,17 +187,24 @@ def main(args):
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
 
+        pose_img, _ = pose_infer(ref_img)
+        pose_img = Image.fromarray(pose_img)
+
         out = pipe(
             image=ref_img,
+            control_image=pose_img,
             height=args.resolution[0],
             width=args.resolution[1],
             num_inference_steps=25,
             guidance_scale=2.0,
             num_images_per_prompt=1,
             generator=generator,
+            cond_scale=1.0,
         )[0]
         out_img = np.concatenate(
-            [ref_img.resize(args.resolution[::-1], 1), out], axis=1)
+            [ref_img.resize(args.resolution[::-1], 1),
+             pose_img.resize(args.resolution[::-1], 1),
+             out], axis=1)
         Image.fromarray(out_img).save(join(args.out_dir, basename(file)))
 
 if __name__ == '__main__':

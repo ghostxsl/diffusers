@@ -36,6 +36,11 @@ def parse_args():
         default=0.2,
         type=float,
         help="")
+    parser.add_argument(
+        "--use_parsing",
+        default=False,
+        action="store_true",
+        help="")
 
     parser.add_argument(
         "--rank",
@@ -87,12 +92,14 @@ def main(args):
         device=device,
         bbox_thr=args.bbox_thr,
     )
-    parsing_infer = HumanParsing(
-        model_path=join(weight_dir, "extensions/deeplabv3plus-xception-vocNov14_20-51-38_epoch-89.pth"),
-        infer_size=512,
-        device=device,
-    )
+
     parsing_thr = 0.003
+    if args.use_parsing:
+        parsing_infer = HumanParsing(
+            model_path=join(weight_dir, "extensions/deeplabv3plus-xception-vocNov14_20-51-38_epoch-89.pth"),
+            infer_size=512,
+            device=device,
+        )
 
     if args.vos_pkl is None:
         img_list = sorted(os.listdir(args.img_dir))
@@ -137,17 +144,20 @@ def main(args):
                     out_list.append(name)
                     continue
 
-                label_parsing = parsing_infer(img)
-                img_area = img.width * img.height
-                if np.sum(label_parsing == 2) / img_area > parsing_thr or np.sum(
-                    label_parsing == 13) / img_area > parsing_thr or np.sum(
-                    label_parsing == 14) / img_area > parsing_thr or np.sum(
-                    label_parsing == 15) / img_area > parsing_thr or np.sum(
-                    label_parsing == 16) / img_area > parsing_thr or np.sum(
-                    label_parsing == 17) / img_area > parsing_thr:
-                    pkl_save(pose, join(args.out_dir, "pose", basename(name) + '.pose'))
+                if args.use_parsing:
+                    label_parsing = parsing_infer(img)
+                    img_area = img.width * img.height
+                    if np.sum(label_parsing == 2) / img_area > parsing_thr or np.sum(
+                        label_parsing == 13) / img_area > parsing_thr or np.sum(
+                        label_parsing == 14) / img_area > parsing_thr or np.sum(
+                        label_parsing == 15) / img_area > parsing_thr or np.sum(
+                        label_parsing == 16) / img_area > parsing_thr or np.sum(
+                        label_parsing == 17) / img_area > parsing_thr:
+                        pkl_save(pose, join(args.out_dir, "pose", basename(name) + '.pose'))
+                    else:
+                        out_list.append(name)
                 else:
-                    out_list.append(name)
+                    pkl_save(pose, join(args.out_dir, "pose", basename(name) + '.pose'))
         except:
             out_list.append(name)
 

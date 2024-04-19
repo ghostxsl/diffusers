@@ -13,11 +13,12 @@ from .utils import draw_bodypose, draw_handpose, draw_facepose, crop_human_bbox
 
 
 __all__ = [
-    'Resize', 'CenterCrop', 'RandomCrop',
+    'Resize', 'RandomResize', 'CenterCrop', 'RandomCrop',
     'RandomHorizontalFlip', 'RandomVerticalFlip',
     'ToTensor', 'Normalize', 'DrawPose',
     'ColorJitter', 'DrawCanny', 'ResizePad',
-    'PasteMatting', 'BoxCrop',
+    'PasteMatting', 'BoxCrop', 'HumanCrop',
+    'RandomSelects',
 ]
 
 
@@ -117,6 +118,49 @@ class Resize(torch.nn.Module):
 
     def __repr__(self) -> str:
         detail = f"(size={self.size}, interpolation={self.interpolation.value}, max_size={self.max_size}, antialias={self.antialias})"
+        return f"{self.__class__.__name__}{detail}"
+
+
+class RandomResize(torch.nn.Module):
+    def __init__(self,
+                 size,
+                 random_size,
+                 prob=0.5,
+                 interpolation=F.InterpolationMode.BILINEAR,
+                 max_size=None,
+                 antialias="warn"):
+        super().__init__()
+        _log_api_usage_once(self)
+
+        if not isinstance(size, (int, Sequence)):
+            raise TypeError(f"Size should be int or sequence. Got {type(size)}")
+        if isinstance(size, Sequence) and len(size) not in (1, 2):
+            raise ValueError("If size is a sequence, it should have 1 or 2 values")
+        self.size = size
+
+        assert isinstance(random_size, Sequence) and len(random_size) == 2
+        self.random_size = random_size
+
+        self.prob = prob
+        self.max_size = max_size
+        if isinstance(interpolation, int):
+            interpolation = F._interpolation_modes_from_int(interpolation)
+        self.interpolation = interpolation
+        self.antialias = antialias
+
+    def forward(self, img):
+        size = random.randint(*self.random_size) if random.random() <= self.prob else self.size
+
+        if isinstance(img, dict):
+            for k, v in img.items():
+                if 'image' in k:
+                    img[k] = F.resize(v, size, self.interpolation, self.max_size, self.antialias)
+        else:
+            img = F.resize(img, size, self.interpolation, self.max_size, self.antialias)
+        return img
+
+    def __repr__(self) -> str:
+        detail = f"(size={self.size}, random_size={self.random_size}, prob={self.prob})"
         return f"{self.__class__.__name__}{detail}"
 
 
@@ -904,7 +948,8 @@ class BoxCrop(object):
     def __init__(self,
                  crop_size=(1024, 768),
                  pad_val=255,
-                 pad_bbox=5):
+                 pad_bbox=5,
+                 prob=1.0):
         _log_api_usage_once(self)
         if isinstance(crop_size, int):
             crop_size = [crop_size, ] * 2
@@ -916,6 +961,7 @@ class BoxCrop(object):
         self.crop_size = crop_size
         self.pad_val = pad_val
         self.pad_bbox = pad_bbox
+        self.prob = prob
 
     def center_crop(self, img, cond_img=None):
         _, h, w = F.get_dimensions(img)
@@ -984,7 +1030,7 @@ class BoxCrop(object):
     def __call__(self, data):
         assert isinstance(data, dict)
 
-        if 'image' in data and 'condition' in data:
+        if 'image' in data and 'condition' in data and random.random() <= self.prob:
             img, cond_img = self.crop_and_resize(
                 data['image'],
                 data['condition']['body']['bboxes'],
@@ -997,9 +1043,137 @@ class BoxCrop(object):
         if 'reference_image' in data and 'reference_condition' in data:
             img, _ = self.crop_and_resize(
                 data['reference_image'], data['reference_condition']['body']['bboxes'])
-        data['reference_image'] = img
+            data['reference_image'] = img
 
         return data
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(crop_size: {self.crop_size}, pad_val: {self.pad_val})"
+
+
+class HumanCrop(object):
+    def __init__(self,
+                 prob=1.0,
+                 pad_bbox=0,
+                 pad_val=255,
+                 is_max_area_bbox=False,
+                 random_crop=False,
+                 w_ratio=0.8,
+                 h_ratio=0.75):
+        _log_api_usage_once(self)
+        self.prob = prob
+        self.pad_bbox = pad_bbox
+        self.pad_val = pad_val
+        self.is_max_area_bbox = is_max_area_bbox
+        self.random_crop = random_crop
+        self.w_ratio = w_ratio
+        self.h_ratio = h_ratio
+
+    def pad_image(self, img, pad_values=255):
+        img = np.array(img)
+        h, w = img.shape[:2]
+        pad_border = None
+        if w > h:
+            pad_ = w - h
+            pad_border = ((pad_ // 2, pad_ - pad_ // 2), (0, 0), (0, 0))
+            img = np.pad(
+                img,
+                pad_border,
+                constant_values=pad_values
+            )
+        elif h > w:
+            pad_ = h - w
+            pad_border = ((0, 0), (pad_ // 2, pad_ - pad_ // 2), (0, 0))
+            img = np.pad(
+                img,
+                pad_border,
+                constant_values=pad_values
+            )
+        return Image.fromarray(img)
+
+    def get_params(self, src_size, output_size):
+        h, w = src_size
+        th, tw = output_size
+
+        if h < th or w < tw:
+            raise ValueError(f"Required crop size {(th, tw)} is larger than input image size {(h, w)}")
+
+        if w == tw and h == th:
+            return 0, 0, h, w
+
+        i = random.randint(0, h - th)
+        j = random.randint(0, w - tw)
+        return [i, j, th, tw]
+
+    def crop_human(self, src_img, bboxes, pad_bbox=0):
+        if len(bboxes) == 0:
+            return src_img
+        else:
+            if self.is_max_area_bbox and len(bboxes) > 1:
+                area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+                ind = np.argmax(area)
+                det_bbox = bboxes[ind]
+            else:
+                det_bbox = bboxes[0]
+
+        _, height, width = F.get_dimensions(src_img)
+        det_bbox *= np.array([width, height, width, height])
+        det_bbox = np.int32(det_bbox)
+        x1, y1, x2, y2 = det_bbox
+        x1 = min(max(x1, 0), width)
+        x2 = min(max(x2, 0), width)
+        y1 = min(max(y1, 0), height)
+        y2 = min(max(y2, 0), height)
+        if pad_bbox > 0:
+            x1 = x1 - pad_bbox if x1 - pad_bbox > 0 else 0
+            y1 = y1 - pad_bbox if y1 - pad_bbox > 0 else 0
+            x2 = x2 + pad_bbox if x2 + pad_bbox < width else width
+            y2 = y2 + pad_bbox if y2 + pad_bbox < height else height
+
+        if x2 - x1 < 0.1 * width or y2 - y1 < 0.1 * height:
+            return src_img
+
+        src_img = np.array(src_img)
+        crop_img = src_img[y1: y2, x1: x2]
+        # random crop
+        if self.random_crop and random.random() <= 0.5:
+            w, h = (x2 - x1), (y2 - y1)
+            cw = random.randint(int(self.w_ratio * w), w)
+            ch = random.randint(int(self.h_ratio * h), h)
+            i, j, th, tw = self.get_params((h, w), (ch, cw))
+            crop_img = crop_img[i: i + th, j: j + tw]
+        # pad image to square
+        crop_img = self.pad_image(crop_img, pad_values=self.pad_val)
+        return crop_img
+
+    def __call__(self, data):
+        if not isinstance(data, dict):
+            return data
+
+        if 'reference_image' in data and 'reference_condition' in data and random.random() <= self.prob:
+            img = self.crop_human(
+                data['reference_image'],
+                data['reference_condition']['body']['bboxes'],
+                pad_bbox=self.pad_bbox
+            )
+            data['reference_image'] = img
+
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(prob: {self.prob}, pad_bbox: {self.pad_bbox})"
+
+
+class RandomSelects(object):
+    def __init__(self, transforms):
+        _log_api_usage_once(self)
+        self.transforms = transforms
+
+    def __call__(self, data):
+        trans = random.choice(self.transforms)
+        data = trans(data)
+
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}"
