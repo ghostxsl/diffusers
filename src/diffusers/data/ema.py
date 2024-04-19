@@ -63,8 +63,6 @@ class ModelEMA(object):
             if model_dict[k].requires_grad:
                 v = decay * v + (1 - decay) * model_dict[k].detach()
                 self.state_dict[k] = v
-            else:
-                self.state_dict[k] = model_dict[k].detach()
 
         self.step += 1
 

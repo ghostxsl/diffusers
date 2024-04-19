@@ -1,7 +1,7 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import os
 import argparse
-from os.path import join, basename
+from os.path import join, splitext, split, exists, basename
 from tqdm import tqdm
 import numpy as np
 
@@ -21,8 +21,13 @@ def parse_args():
         type=str,
         help="Path to reference image.")
     parser.add_argument(
+        "--out_file",
+        default="output.json",
+        type=str,
+        help="File name to save.")
+    parser.add_argument(
         "--out_dir",
-        default="output",
+        default=None,
         type=str,
         help="Directory to save.")
     parser.add_argument(
@@ -56,7 +61,9 @@ def parse_args():
         help="Device to use (e.g. cpu, cuda:0, cuda:1, etc.)")
 
     args = parser.parse_args()
-    os.makedirs(args.out_dir, exist_ok=True)
+    out_dir, _ = split(args.out_file)
+    if out_dir and not exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
 
     return args
 
@@ -101,21 +108,40 @@ def main(args):
         end_idx = stride * (args.rank + 1) if args.rank + 1 < args.num_ranks else len(img_list)
         img_list = img_list[start_idx: end_idx]
 
-    out_list = []
+    save_list = []
     for name in tqdm(img_list):
         try:
             img = read_image(args, name)
-            bboxes, _ = pose_infer.detector(img)
-            if len(bboxes) > 0:
-                # 保留有人的
-                out_list.append(name)
+            _, pose = pose_infer(img, body=False, hand=False)
+            # 保留图像中有人的
+            if len(pose['body']['bboxes']) > 0:
+                width, height = pose['width'], pose['height']
+                bboxes = pose['body']['bboxes'][0] * np.array([width, height, width, height])
+                x1, y1, x2, y2 = bboxes
+                bh, bw = y2 - y1, x2 - x1
+                kpts = pose['body']['keypoints'][0]
+                # 过滤人像占比太小的图像
+                if bh < height * 0.1 or bw < width * 0.1 or np.max(kpts[..., -1]) < 0.3:
+                    continue
+
+                if args.out_dir is not None:
+                    if args.vos_pkl is None:
+                        os.makedirs(args.out_dir, exist_ok=True)
+                        pkl_save(pose, join(args.out_dir, basename(name)))
+                    else:
+                        args.vos_client.upload_vos_pkl(
+                            pose, join(args.out_dir, name)
+                        )
+                save_list.append(name)
         except:
             continue
 
     if args.rank is not None:
-        json_save(out_list, join(args.out_dir, f"filter_human_{args.rank}.json"))
+        out_dir, out_file = split(args.out_file)
+        out_file = splitext(out_file)[0] + f"_{args.rank}.json"
+        json_save(save_list, join(out_dir, out_file))
     else:
-        json_save(out_list, join(args.out_dir, "filter_human.json"))
+        json_save(save_list, args.out_file)
 
 
 if __name__ == '__main__':

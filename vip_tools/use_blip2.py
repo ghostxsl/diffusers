@@ -2,6 +2,7 @@
 from lavis.models import load_model_and_preprocess
 from PIL import Image, ImageOps
 import torch
+import numpy as np
 import os
 from os.path import join, splitext
 import csv

@@ -52,7 +52,7 @@ from .unets.unet_2d_blocks import (
     get_down_block,
     get_up_block,
 )
-from .transformers.transformer_2d import Transformer2DModelOutput
+from .modeling_outputs import Transformer2DModelOutput
 from .vip.pt_referencenet import UNet2DConditionOutput
 
 

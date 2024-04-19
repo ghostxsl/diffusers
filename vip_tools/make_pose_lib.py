@@ -1,12 +1,26 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import os
-from os.path import join, exists, splitext, basename
+from os.path import join, exists, splitext, basename, split
 import argparse
 from tqdm import tqdm
 import numpy as np
 import csv
 
 from diffusers.data.utils import *
+
+
+gender_map = {
+    "男性": "man",
+    "女性": "woman",
+    "男童": "boy",
+    "女童": "girl",
+    "man": "man",
+    "woman": "woman",
+    "boy": "boy",
+    "girl": "girl",
+    "male": "man",
+    "female": "woman",
+}
 
 
 def parse_args():
@@ -22,10 +36,10 @@ def parse_args():
         type=str,
         help="Path to src pose file.")
     parser.add_argument(
-        "--out_dir",
-        default="output",
+        "--out_file",
+        default="output.lib",
         type=str,
-        help="Directory to save.")
+        help="File path to save.")
     parser.add_argument(
         "--gender_file",
         default=None,
@@ -42,7 +56,9 @@ def parse_args():
         ),
     )
     args = parser.parse_args()
-    os.makedirs(args.out_dir, exist_ok=True)
+    out_dir, _ = split(args.out_file)
+    if out_dir and not exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
 
     if len(args.resolution.split("x")) == 1:
         args.resolution = [int(args.resolution), ] * 2
@@ -55,46 +71,68 @@ def parse_args():
 
 
 def normalize_pose(pose, crop_size=(768, 576)):
-    ch, cw = crop_size
-    w, h = pose['width'], pose['height']
     bboxes = pose['body']['bboxes']
     if len(bboxes) == 0:
         return None, None
 
     # 取得分最高的bbox, 变换为原始坐标
+    ch, cw = crop_size
+    w, h = pose['width'], pose['height']
     bbox = bboxes[0] * np.array([w, h, w, h])
     # 取得分最高的keypoints, 变换为原始坐标
     body_kpts = pose['body']['keypoints'][0] * np.array([w, h, 1.])
+    hand_kpts = pose['hand']['keypoints'][:2] * np.array([w, h, 1.])
+    face_kpts = pose['face']['keypoints'][0] * np.array([w, h, 1.])
     # 平移关键点
     body_kpts[..., :2] -= bbox[:2]
+    hand_kpts[..., :2] -= bbox[:2]
+    face_kpts[..., :2] -= bbox[:2]
 
     # 按比例resize
     bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
     ratio_h, ratio_w = ch / bh, cw / bw
 
     out_ratio = ratio_h
-    pad_shift = [0, 0] # x, y
+    pad_shift = [0, 0]  # x, y
     if ratio_h < ratio_w:
         # 按高 resize
         ow = int(bh / ch * cw)
         expand_w = ow - bw
-        body_kpts[..., 0] += int(expand_w / 2)
+        offset_x = int(expand_w / 2)
+        # body
+        body_kpts[..., 0] += offset_x
         body_kpts[..., :2] *= ratio_h
+        # hand
+        hand_kpts[..., 0] += offset_x
+        hand_kpts[..., :2] *= ratio_h
+        # face
+        face_kpts[..., 0] += offset_x
+        face_kpts[..., :2] *= ratio_h
 
         pad_shift[0] = int(expand_w / 2)
     elif ratio_h > ratio_w:
         # 按宽 resize
         oh = int(bw / cw * ch)
         expand_h = oh - bh
-        body_kpts[..., 1] += int(expand_h / 2)
+        offset_y = int(expand_h / 2)
+        # body
+        body_kpts[..., 1] += offset_y
         body_kpts[..., :2] *= ratio_w
+        # hand
+        hand_kpts[..., 1] += offset_y
+        hand_kpts[..., :2] *= ratio_w
+        # face
+        face_kpts[..., 1] += offset_y
+        face_kpts[..., :2] *= ratio_w
 
         out_ratio = ratio_w
         pad_shift[1] = int(expand_h / 2)
     else:
         body_kpts[..., :2] *= ratio_h
+        hand_kpts[..., :2] *= ratio_h
+        face_kpts[..., :2] *= ratio_h
 
-    return body_kpts[None], (out_ratio, pad_shift, bbox)
+    return (body_kpts[None], hand_kpts[None], face_kpts[None]), (out_ratio, pad_shift, bbox)
 
 
 def process_gender_file(file_path):
@@ -117,54 +155,76 @@ def process_gender_file(file_path):
 
 
 def main(args):
-    gender_map = {
-        "男性": "man",
-        "女性": "woman",
-        "男童": "boy",
-        "女童": "girl",
-        "man": "man",
-        "woman": "woman",
-        "boy": "boy",
-        "girl": "girl",
-    }
-
     pose_list = sorted(os.listdir(args.pose_dir))
-    gender_dict = process_gender_file(args.gender_file)
+    if args.gender_file is not None:
+        gender_dict = process_gender_file(args.gender_file)
 
     print("Make and normalize pose lib...")
-    out_pose = {"dts": []}
+    out_pose = {
+        "body": {"person": []},
+        "hand": {"person": []},
+        "face": {"person": []},
+        "file_name": {"person": []},
+    }
+
     for name in tqdm(pose_list):
         try:
             pose = load_file(join(args.pose_dir, name))
-            body_kpts, _ = normalize_pose(pose, args.resolution)
-            if body_kpts is None:
+            kpts, _ = normalize_pose(pose, args.resolution)
+            if kpts is None:
                 continue
 
-            out_pose["dts"].append(body_kpts)
-            if splitext(name)[0] in gender_dict:
+            body_kpts, hand_kpts, face_kpts = kpts
+            out_pose["body"]["person"].append(body_kpts)
+            out_pose["hand"]["person"].append(hand_kpts)
+            out_pose["face"]["person"].append(face_kpts)
+            out_pose["file_name"]["person"].append(splitext(name)[0] + '.jpg')
+
+            if args.gender_file is not None and splitext(name)[0] in gender_dict:
                 gender = gender_dict[splitext(name)[0]]
-                gender = gender_map[gender] if gender in gender_map else None
+                gender = gender_map.get(gender, None)
                 if gender is not None:
-                    if gender not in out_pose:
-                        out_pose[gender] = [body_kpts]
+                    if gender not in out_pose["body"]:
+                        out_pose["body"][gender] = [body_kpts]
                     else:
-                        out_pose[gender].append(body_kpts)
+                        out_pose["body"][gender].append(body_kpts)
+
+                    if gender not in out_pose["hand"]:
+                        out_pose["hand"][gender] = [hand_kpts]
+                    else:
+                        out_pose["hand"][gender].append(hand_kpts)
+
+                    if gender not in out_pose["face"]:
+                        out_pose["face"][gender] = [face_kpts]
+                    else:
+                        out_pose["face"][gender].append(face_kpts)
+
+                    if gender not in out_pose["file_name"]:
+                        out_pose["file_name"][gender] = [splitext(name)[0] + '.jpg']
+                    else:
+                        out_pose["file_name"][gender].append(splitext(name)[0] + '.jpg')
         except:
             continue
 
-    out_pose = {k: np.concatenate(v) for k, v in out_pose.items()}
+    out_pose["body"] = {k: np.concatenate(v) for k, v in out_pose["body"].items()}
+    out_pose["hand"] = {k: np.concatenate(v) for k, v in out_pose["hand"].items()}
+    out_pose["face"] = {k: np.concatenate(v) for k, v in out_pose["face"].items()}
 
     if args.src_pose_file is not None:
         src_pose = load_file(args.src_pose_file)
-        for k, v in src_pose.items():
-            if k not in out_pose:
-                out_pose[k] = v
-            else:
-                out_pose[k] = np.concatenate([v, out_pose[k]])
+        for k0 in ["body", "hand", "face"]:
+            for k, v in src_pose[k0].items():
+                if k not in out_pose[k0]:
+                    out_pose[k0][k] = v
+                else:
+                    out_pose[k0][k] = np.concatenate([v, out_pose[k0][k]])
 
-    pkl_save(out_pose, join(args.out_dir, 'mote_pose.lib'))
-    print(f"Save file to {join(args.out_dir, 'mote_pose.lib')}")
-    [print(f"{k}: {len(v)}") for k, v in out_pose.items()]
+    pkl_save(out_pose, args.out_file)
+    print(f"Save file to {args.out_file}")
+    [print(f"body: {k}: {len(v)}") for k, v in out_pose["body"].items()]
+    [print(f"hand: {k}: {len(v)}") for k, v in out_pose["hand"].items()]
+    [print(f"face: {k}: {len(v)}") for k, v in out_pose["face"].items()]
+    [print(f"file_name: {k}: {len(v)}") for k, v in out_pose["file_name"].items()]
 
 
 if __name__ == '__main__':

@@ -127,7 +127,7 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
             Dimension of output from time embedding. Needs to be same as in the base model.
         learn_embedding (`bool`, defaults to `False`):
             Whether to use time embedding of the control model. If yes, the time embedding is a linear interpolation of
-            the time embeddings of the control and base model with interpolation parameter `time_embedding_mix**3`.
+            the time embeddings of the control and base model with interpolation parameter `time_embedding_mix**0.3`.
         time_embedding_mix (`float`, defaults to 1.0):
             Linear interpolation parameter used if `learn_embedding` is `True`. A value of 1.0 means only the
             control model's time embedding will be used. A value of 0.0 means only the base model's time embedding will be used.
@@ -136,14 +136,14 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
     """
 
     @classmethod
-    def init_original(cls, base_model: UNet2DConditionModel, is_sdxl=True, size_ratio=0.1):
+    def init_original(cls, base_model, is_sdxl=False, size_ratio=0.2):
         """
         Create a ControlNetXS model with the same parameters as in the original paper (https://github.com/vislearn/ControlNet-XS).
 
         Parameters:
             base_model (`UNet2DConditionModel`):
                 Base UNet model. Needs to be either StableDiffusion or StableDiffusion-XL.
-            is_sdxl (`bool`, defaults to `True`):
+            is_sdxl (`bool`, defaults to `False`):
                 Whether passed `base_model` is a StableDiffusion-XL model.
         """
 
@@ -162,15 +162,15 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
                 base_model,
                 time_embedding_mix=0.95,
                 learn_embedding=True,
-                size_ratio=0.1,
+                size_ratio=size_ratio,
                 conditioning_embedding_out_channels=(16, 32, 96, 256),
-                num_attention_heads=get_dim_attn_heads(base_model, 0.1, 64),
+                num_attention_heads=get_dim_attn_heads(base_model, size_ratio, 64),
             )
         else:
             return ControlNetXSModel.from_unet(
                 base_model,
-                time_embedding_mix=1.0,
-                learn_embedding=False,
+                time_embedding_mix=0.5,
+                learn_embedding=True,
                 size_ratio=size_ratio,
                 conditioning_embedding_out_channels=(16, 32, 96, 256),
                 num_attention_heads=get_dim_attn_heads(base_model, size_ratio, 8),
@@ -684,7 +684,11 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         encoder_hidden_states = self.process_encoder_hidden_states(
             base_model, encoder_hidden_states, added_cond_kwargs
         )
-        cemb = encoder_hidden_states
+        if base_model.config.encoder_hid_dim_type == "ip_image_proj":
+            base_cemb = encoder_hidden_states
+            ctrl_cemd = torch.squeeze(encoder_hidden_states[1][0])
+        else:
+            base_cemb = ctrl_cemd = encoder_hidden_states
 
         # Preparation
         if controlnet_cond.ndim != 4:
@@ -697,7 +701,10 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
             sample = sample.reshape((-1,) + sample.shape[-3:])
             sample_reshape = True
             temb = temb.repeat_interleave(repeats=num_frames, dim=0)
-            cemb = cemb.repeat_interleave(repeats=num_frames, dim=0)
+            ctrl_cemd = ctrl_cemd.repeat_interleave(repeats=num_frames, dim=0)
+            if base_model.config.encoder_hid_dim_type == "ip_image_proj":
+                base_cemb[0] = base_cemb[0].repeat_interleave(repeats=num_frames, dim=0)
+                base_cemb[1] = base_cemb[1].repeat_interleave(repeats=num_frames, dim=0)
 
         h_ctrl = h_base = sample
         hs_base, hs_ctrl = [], []
@@ -726,8 +733,8 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         # 1 - down
         for m_base, m_ctrl in zip(base_down_subblocks, ctrl_down_subblocks):
             h_ctrl = torch.cat([h_ctrl, next(it_down_convs_in)(h_base)], dim=1)  # A - concat base -> ctrl
-            h_base = m_base(h_base, temb, cemb, attention_mask, cross_attention_kwargs)  # B - apply base subblock
-            h_ctrl = m_ctrl(h_ctrl, temb, cemb, attention_mask, cross_attention_kwargs)  # C - apply ctrl subblock
+            h_base = m_base(h_base, temb, base_cemb, attention_mask, cross_attention_kwargs)  # B - apply base subblock
+            h_ctrl = m_ctrl(h_ctrl, temb, ctrl_cemd, attention_mask, cross_attention_kwargs)  # C - apply ctrl subblock
             h_base = h_base + next(it_down_convs_out)(h_ctrl) * next(scales)  # D - add ctrl -> base
             hs_base.append(h_base)
             hs_ctrl.append(h_ctrl)
@@ -735,15 +742,15 @@ class ControlNetXSModel(ModelMixin, ConfigMixin):
         # 2 - mid
         h_ctrl = torch.cat([h_ctrl, next(it_down_convs_in)(h_base)], dim=1)  # A - concat base -> ctrl
         for m_base, m_ctrl in zip(base_mid_subblocks, ctrl_mid_subblocks):
-            h_base = m_base(h_base, temb, cemb, attention_mask, cross_attention_kwargs)  # B - apply base subblock
-            h_ctrl = m_ctrl(h_ctrl, temb, cemb, attention_mask, cross_attention_kwargs)  # C - apply ctrl subblock
+            h_base = m_base(h_base, temb, base_cemb, attention_mask, cross_attention_kwargs)  # B - apply base subblock
+            h_ctrl = m_ctrl(h_ctrl, temb, ctrl_cemd, attention_mask, cross_attention_kwargs)  # C - apply ctrl subblock
         h_base = h_base + self.middle_block_out(h_ctrl) * next(scales)  # D - add ctrl -> base
 
         # 3 - up
         for i, m_base in enumerate(base_up_subblocks):
             h_base = h_base + next(it_up_convs_out)(hs_ctrl.pop()) * next(scales)  # add info from ctrl encoder
             h_base = torch.cat([h_base, hs_base.pop()], dim=1)  # concat info from base encoder+ctrl encoder
-            h_base = m_base(h_base, temb, cemb, attention_mask, cross_attention_kwargs)
+            h_base = m_base(h_base, temb, base_cemb, attention_mask, cross_attention_kwargs)
 
         h_base = base_model.conv_norm_out(h_base)
         h_base = base_model.conv_act(h_base)

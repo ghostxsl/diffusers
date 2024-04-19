@@ -7,11 +7,11 @@ from PIL import Image
 import torch
 
 from diffusers import AutoencoderKL, UNet2DConditionModel
-from diffusers.models.vip import SimReferenceNetModel
-from diffusers.pipelines.vip.vip_image_variation import VIPImageVariationPipeline
+from diffusers.models.controlnet import ControlNetModel
+from diffusers.pipelines.controlnet.vip_pipeline_controlnet_inpaint import VIPStableDiffusionControlNetInpaintPipeline
 from diffusers.schedulers import EulerAncestralDiscreteScheduler, KDPMPP2MDiscreteScheduler
 from diffusers.utils.vip_utils import *
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+from transformers import AutoTokenizer, CLIPTextModel, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 
 def parse_args():
@@ -26,7 +26,6 @@ def parse_args():
         default=None,
         type=str,
         help="Directory to reference image.")
-
     parser.add_argument(
         "--out_dir",
         default="output",
@@ -43,19 +42,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--unet_model_path",
+        "--base_model_path",
         type=str,
-        default="/apps/dat/cv/xsl/exp_animate/sdiv_290k/unet",
+        default="/apps/dat/cv/xsl/weights/stable-diffusion-v1-5",
     )
     parser.add_argument(
-        "--referencenet_model_path",
+        "--ip_adapter_model_path",
         type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--scheduler_path",
-        type=str,
-        default="/apps/dat/cv/xsl/exp_animate/scheduler",
+        default="/apps/dat/cv/xsl/exp_animate/checkpoint-85000/ip_adapter/ip_adapter_plus.bin",
     )
     parser.add_argument(
         "--vae_model_path",
@@ -66,6 +60,11 @@ def parse_args():
         "--image_encoder_model_path",
         type=str,
         default="/apps/dat/cv/xsl/weights/IP-Adapter/image_encoder",
+    )
+    parser.add_argument(
+        "--controlnet_model_path",
+        type=str,
+        default="/apps/dat/cv/xsl/weights/control_v11p_sd15_openpose",
     )
 
     parser.add_argument(
@@ -147,36 +146,55 @@ def main(args):
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
         args.image_encoder_model_path).to(device, dtype=dtype)
 
-    unet = UNet2DConditionModel.from_pretrained(args.unet_model_path).to(device, dtype=dtype)
-    if args.referencenet_model_path:
-        referencenet = SimReferenceNetModel.from_pretrained(
-            args.referencenet_model_path).to(device, dtype=dtype)
-    scheduler = EulerAncestralDiscreteScheduler.from_pretrained(args.scheduler_path)
-    pipe = VIPImageVariationPipeline(
+    unet = UNet2DConditionModel.from_pretrained(args.base_model_path, subfolder="unet").to(device, dtype=dtype)
+    unet._init_ip_adapter_plus(state_dict=torch.load(args.ip_adapter_model_path, map_location=torch.device("cpu")))
+    scheduler = EulerAncestralDiscreteScheduler.from_pretrained(args.base_model_path, subfolder="scheduler")
+    # Load the tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.base_model_path,
+        subfolder="tokenizer",
+        use_fast=False,
+    )
+    # import correct text encoder class
+    text_encoder = CLIPTextModel.from_pretrained(args.base_model_path, subfolder="text_encoder").to(device, dtype=dtype)
+    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_path).to(device, dtype=dtype)
+    pipe = VIPStableDiffusionControlNetInpaintPipeline(
         vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
         unet=unet,
         scheduler=scheduler,
+        controlnet=controlnet,
         feature_extractor=CLIPImageProcessor(),
         image_encoder=image_encoder,
-        referencenet=referencenet if args.referencenet_model_path else None,
     ).to(device)
 
     for i, file in enumerate(ref_img_list):
         ref_img = load_image(file)
         ref_img = pad_image(ref_img)
-        print(f"{i + 1}: {file}")
+        print(f"{i + 1}/{len(ref_img_list)}: {file}")
         seed = get_fixed_seed(-1)
         generator = get_torch_generator(seed, device=device)
+        mask_image = Image.new("RGB", args.resolution[::-1], color=(255, 255, 255))
 
-        out = pipe(
+        out, image_overlay = pipe(
+            prompt="",
+            negative_prompt="",
             image=ref_img,
+            mask_image=mask_image,
+            control_image=mask_image,
+            ip_adapter_image=ref_img,
             height=args.resolution[0],
             width=args.resolution[1],
+            strength=1.0,
             num_inference_steps=25,
-            guidance_scale=2.0,
+            guidance_scale=3.0,
             num_images_per_prompt=1,
             generator=generator,
-        )[0]
+            controlnet_conditioning_scale=0.0,
+            masked_content="noise",
+        )
+        out = alpha_composite(out, image_overlay)[0]
         out_img = np.concatenate(
             [ref_img.resize(args.resolution[::-1], 1), out], axis=1)
         Image.fromarray(out_img).save(join(args.out_dir, basename(file)))
