@@ -15,7 +15,8 @@
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import PIL.Image
+import numpy as np
+from PIL import Image, ImageOps
 import torch
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
@@ -69,6 +70,34 @@ EXAMPLE_DOC_STRING = """
 """
 
 
+def prepare_mask_and_masked_image(image, mask, height, width):
+    assert isinstance(image, Image.Image)
+    assert isinstance(mask, Image.Image)
+
+    # preprocess mask
+    mask = mask.convert("L").resize((width, height), resample=Image.LANCZOS)
+
+    mask_overlay = np.array(mask, dtype=np.float32) * 2
+    mask_overlay = Image.fromarray(np.clip(mask_overlay, 0, 255).astype(np.uint8))
+
+    # preprocess image
+    image = image.resize((width, height), resample=Image.LANCZOS)
+    image_overlay = Image.new('RGBa', (width, height))
+    image_overlay.paste(image.convert("RGBA").convert("RGBa"),
+                       mask=ImageOps.invert(mask_overlay))
+    image_overlay = image_overlay.convert("RGBA")
+
+    image = np.array(image)[None,].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image).to(torch.float32) / 255.0
+    image = 2. * image - 1.
+
+    torch_mask = np.array(mask, dtype=np.float32)[None, None,]
+    torch_mask = torch.from_numpy(torch_mask)
+    masked_image = image * (torch_mask < 127.5)
+
+    return mask, masked_image, image, image_overlay
+
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
@@ -83,7 +112,7 @@ def retrieve_latents(
         raise AttributeError("Could not access latents of provided encoder_output")
 
 
-class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, StableDiffusionXLLoraLoaderMixin, IPAdapterMixin):
+class KolorsControlNetInpaintPipeline(DiffusionPipeline, StableDiffusionMixin, StableDiffusionXLLoraLoaderMixin, IPAdapterMixin):
     r"""
     Pipeline for image-to-image generation using Kolors.
 
@@ -363,7 +392,7 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
             negative_image_embeds = []
         if ip_adapter_image_embeds is None:
             if ip_adapter_image is None:
-                ip_adapter_image = PIL.Image.new("RGB", (336, 336))
+                ip_adapter_image = Image.new("RGB", (336, 336))
 
             if not isinstance(ip_adapter_image, list):
                 ip_adapter_image = [ip_adapter_image]
@@ -520,82 +549,73 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
 
         return timesteps, num_inference_steps - t_start
 
-    # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl_img2img.StableDiffusionXLImg2ImgPipeline.prepare_latents
-    def prepare_latents(
-        self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None, add_noise=True
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+        dtype = image.dtype
+        # make sure the VAE is in float32 mode, as it overflows in float16
+        if self.vae.config.force_upcast:
+            image = image.float()
+            self.vae.to(dtype=torch.float32)
+
+        if isinstance(generator, list):
+            image_latents = [
+                self.vae.encode(image[i: i + 1]).latent_dist.sample(generator=generator[i])
+                for i in range(image.shape[0])
+            ]
+            image_latents = torch.cat(image_latents, dim=0)
+        else:
+            image_latents = self.vae.encode(image).latent_dist.sample(generator=generator)
+
+        image_latents = self.vae.config.scaling_factor * image_latents
+
+        if self.vae.config.force_upcast:
+            self.vae.to(dtype)
+
+        return image_latents
+
+    def prepare_mask(
+        self, mask, num_images_per_prompt, height, width, dtype, device
     ):
-        latents_mean = latents_std = None
-        if hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None:
-            latents_mean = torch.tensor(self.vae.config.latents_mean).view(1, 4, 1, 1)
-        if hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None:
-            latents_std = torch.tensor(self.vae.config.latents_std).view(1, 4, 1, 1)
+        # resize the mask to latents shape as we concatenate the mask to the latents
+        # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
+        # and half precision
+        mask = mask.resize((width // self.vae_scale_factor, height // self.vae_scale_factor))
+        mask = torch.from_numpy(np.array(mask, dtype=np.float32)[None, None,])
+        mask = torch.round(mask / 255.0).to(device=device, dtype=dtype)
+        mask = mask.repeat_interleave(num_images_per_prompt, dim=0)
+
+        return mask
+
+    def prepare_latents(
+        self,
+        image,
+        mask,
+        batch_size,
+        num_channels_latents,
+        height,
+        width,
+        dtype,
+        device,
+        generator,
+        timestep=None,
+        **kwargs
+    ):
+        shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
 
         image = image.to(device=device, dtype=dtype)
+        image_latents = self._encode_vae_image(image=image, generator=generator).to(dtype=dtype)
+        if kwargs.get('masked_content', 'original') == 'noise':
+            mask = mask[:1]
+            image_latents *= (1 - mask)
 
-        batch_size = batch_size * num_images_per_prompt
+        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        latents = self.scheduler.add_noise(image_latents, noise, timestep)
 
-        if image.shape[1] == 4:
-            init_latents = image
-
-        else:
-            # make sure the VAE is in float32 mode, as it overflows in float16
-            if self.vae.config.force_upcast:
-                image = image.float()
-                self.vae.to(dtype=torch.float32)
-
-            if isinstance(generator, list) and len(generator) != batch_size:
-                raise ValueError(
-                    f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                    f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-                )
-
-            elif isinstance(generator, list):
-                if image.shape[0] < batch_size and batch_size % image.shape[0] == 0:
-                    image = torch.cat([image] * (batch_size // image.shape[0]), dim=0)
-                elif image.shape[0] < batch_size and batch_size % image.shape[0] != 0:
-                    raise ValueError(
-                        f"Cannot duplicate `image` of batch size {image.shape[0]} to effective batch_size {batch_size} "
-                    )
-
-                init_latents = [
-                    retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
-                    for i in range(batch_size)
-                ]
-                init_latents = torch.cat(init_latents, dim=0)
-            else:
-                init_latents = retrieve_latents(self.vae.encode(image), generator=generator)
-
-            if self.vae.config.force_upcast:
-                self.vae.to(dtype)
-
-            init_latents = init_latents.to(dtype)
-            if latents_mean is not None and latents_std is not None:
-                latents_mean = latents_mean.to(device=device, dtype=dtype)
-                latents_std = latents_std.to(device=device, dtype=dtype)
-                init_latents = (init_latents - latents_mean) * self.vae.config.scaling_factor / latents_std
-            else:
-                init_latents = self.vae.config.scaling_factor * init_latents
-
-        if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
-            # expand init_latents for batch_size
-            additional_image_per_prompt = batch_size // init_latents.shape[0]
-            init_latents = torch.cat([init_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] != 0:
-            raise ValueError(
-                f"Cannot duplicate `image` of batch size {init_latents.shape[0]} to {batch_size} text prompts."
-            )
-        else:
-            init_latents = torch.cat([init_latents], dim=0)
-
-        if add_noise:
-            shape = init_latents.shape
-            noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-            # get latents
-            init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
-
-        latents = init_latents
-
-        return latents
+        return latents, noise, image_latents
 
     # Copied from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl.StableDiffusionXLPipeline._get_add_time_ids
     def _get_add_time_ids(
@@ -727,6 +747,7 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
         prompt: Union[str, List[str]] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         image: PipelineImageInput = None,
+        mask_image: PipelineImageInput = None,
         control_image: PipelineImageInput = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
@@ -760,6 +781,7 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
         ] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 256,
+        **kwargs
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -964,8 +986,6 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
         )
 
         # 4. Prepare image and controlnet_conditioning_image
-        image = self.image_processor.preprocess(image, height=height, width=width)
-
         if isinstance(controlnet, ControlNetModel):
             control_image = self.prepare_control_image(
                 image=control_image,
@@ -1000,6 +1020,10 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
         else:
             assert False
 
+        # 4.1 Preprocess mask and image - resizes image and mask w.r.t height and width
+        mask, masked_image, init_image, image_overlay = prepare_mask_and_masked_image(
+            image, mask_image, height, width)
+
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps, num_inference_steps = self.get_timesteps(
@@ -1009,15 +1033,22 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
 
         # 6. Prepare latent variables
         if latents is None:
-            latents = self.prepare_latents(
-                image,
-                latent_timestep,
-                batch_size,
+            mask = self.prepare_mask(
+                mask, num_images_per_prompt, height, width, prompt_embeds.dtype, device)
+
+            num_channels_latents = self.vae.config.latent_channels
+            latents, noise, image_latents = self.prepare_latents(
+                init_image,
+                mask,
                 num_images_per_prompt,
+                num_channels_latents,
+                height,
+                width,
                 prompt_embeds.dtype,
                 device,
                 generator,
-                add_noise=True,
+                timestep=latent_timestep,
+                **kwargs
             )
 
         # 7. Prepare extra step kwargs.
@@ -1141,18 +1172,22 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
                     return_dict=False,
                 )[0]
 
+                # compute predicted original sample (x_0) from sigma-scaled predicted noise
+                pred_original_sample = self.scheduler.get_pred_original_sample(
+                    noise_pred, t, torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents)
+
                 # perform guidance
                 if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    pred_uncond, pred_text = pred_original_sample.chunk(2)
+                    pred_original_sample = pred_uncond + guidance_scale * (pred_text - pred_uncond)
+
+                # inpaint
+                init_latents_proper = image_latents[:1]
+                init_mask = mask[:1]
+                pred_original_sample = (1 - init_mask) * init_latents_proper + init_mask * pred_original_sample
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                        latents = latents.to(latents_dtype)
+                latents = self.scheduler.webui_step(pred_original_sample, t, latents, **extra_step_kwargs)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -1175,6 +1210,10 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
+
+        # inpaint
+        init_mask = mask[:1]
+        latents = (1 - init_mask) * image_latents[:1] + init_mask * latents
 
         if not output_type == "latent":
             # make sure the VAE is in float32 mode, as it overflows in float16
@@ -1201,7 +1240,11 @@ class KolorsControlNetImg2ImgPipeline(DiffusionPipeline, StableDiffusionMixin, S
         if not output_type == "latent":
             image = self.image_processor.postprocess(image, output_type=output_type)
 
+        # remove cache variables
+        if getattr(self.scheduler, 'pred_ori_sample_prev', None) is not None:
+            delattr(self.scheduler, 'pred_ori_sample_prev')
+
         # Offload all models
         self.maybe_free_model_hooks()
 
-        return image
+        return image, image_overlay

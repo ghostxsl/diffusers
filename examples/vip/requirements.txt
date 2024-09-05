@@ -10,3 +10,5 @@ opencv-python
 matplotlib
 peft==0.10.0
 boto3
+sentencepiece
+xformers

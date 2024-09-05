@@ -296,11 +296,11 @@ class RandomCrop(torch.nn.Module):
         _, height, width = F.get_dimensions(img)
         # pad the width if needed
         if self.pad_if_needed and width < self.size[1]:
-            padding = [self.size[1] - width, 0]
+            padding = [0, 0, self.size[1] - width, 0]
             img = F.pad(img, padding, self.fill, self.padding_mode)
         # pad the height if needed
         if self.pad_if_needed and height < self.size[0]:
-            padding = [0, self.size[0] - height]
+            padding = [0, 0, 0, self.size[0] - height]
             img = F.pad(img, padding, self.fill, self.padding_mode)
         return img
 
@@ -1158,6 +1158,8 @@ class HumanCrop(object):
                 pad_bbox=pad_bbox,
             )
             data['reference_image'] = img
+        else:
+            data['reference_image'] = self.pad_image(data['reference_image'], pad_values=self.pad_val)
 
         return data
 

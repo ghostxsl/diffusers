@@ -6,3 +6,4 @@ from .vip_pixel_pose_transfer import VIPPixelPoseTransferPipeline
 from .vip_ip_adapter_pose_transfer import VIPIPAPoseTransferPipeline
 from .vip_sdiv_controlnetxs import VIPIVControlNetXSPipeline
 from .kolors_controlnet_img2img import KolorsControlNetImg2ImgPipeline
+from .kolors_controlnet_inpaint import KolorsControlNetInpaintPipeline

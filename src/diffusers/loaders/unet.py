@@ -910,6 +910,14 @@ class UNet2DConditionLoadersMixin:
                               embed_dims=1280,
                               num_class_embeds=None,
                               state_dict=None):
+        # Kolors Unet already has a `encoder_hid_proj`
+        if (
+            self.encoder_hid_proj is not None
+            and self.config.encoder_hid_dim_type == "text_proj"
+            and not hasattr(self, "text_encoder_hid_proj")
+        ):
+            self.text_encoder_hid_proj = self.encoder_hid_proj
+
         from ..models.attention_processor import (
             AttnProcessor,
             AttnProcessor2_0,
@@ -953,7 +961,7 @@ class UNet2DConditionLoadersMixin:
             embed_dims=embed_dims,
             output_dims=self.config.cross_attention_dim,
             hidden_dims=self.config.cross_attention_dim,
-            heads=self.config.cross_attention_dim // 64,
+            heads=12,
             num_queries=num_image_text_embeds,
         )
 

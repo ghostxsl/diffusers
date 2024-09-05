@@ -13,7 +13,7 @@ import numpy as np
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
-    'i2i_collate_fn',
+    'i2i_collate_fn', 'kolors_collate_fn', 'flux_collate_fn',
     'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5', 'crop_human_bbox',
@@ -118,6 +118,71 @@ def i2i_collate_fn(examples):
         "uncond": uncond,
         "conditioning_pixel_values": conditioning_pixel_values,
         "class_label": class_label,
+    }
+
+
+def kolors_collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    if 'input_ids' in examples[0]:
+        input_ids = torch.cat([example["input_ids"] for example in examples])
+    else:
+        input_ids = torch.zeros([0])
+
+    if 'reference_image' in examples[0]:
+        reference_image = torch.cat([example["reference_image"] for example in examples])
+        reference_image = reference_image.to(memory_format=torch.contiguous_format).float()
+    else:
+        reference_image = torch.zeros([0])
+
+    if 'uncond' in examples[0]:
+        uncond = torch.stack([example["uncond"] for example in examples])
+        uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    else:
+        uncond = torch.zeros([0])
+
+    if 'conditioning_pixel_values' in examples[0]:
+        conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
+        conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+    else:
+        conditioning_pixel_values = torch.zeros([0])
+
+    if 'add_time_ids' in examples[0]:
+        add_time_ids = torch.cat([example["add_time_ids"] for example in examples])
+    else:
+        add_time_ids = torch.zeros([0])
+
+    return {
+        "pixel_values": pixel_values,
+        "reference_image": reference_image,
+        "input_ids": input_ids,
+        "uncond": uncond,
+        "conditioning_pixel_values": conditioning_pixel_values,
+        "add_time_ids": add_time_ids,
+    }
+
+
+def flux_collate_fn(examples):
+    pixel_values = torch.stack([example["pixel_values"] for example in examples])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    if 'reference_image' in examples[0]:
+        reference_image = torch.cat([example["reference_image"] for example in examples])
+        reference_image = reference_image.to(memory_format=torch.contiguous_format).float()
+    else:
+        reference_image = torch.zeros([0])
+
+    if 'uncond' in examples[0]:
+        uncond = torch.stack([example["uncond"] for example in examples])
+        uncond = uncond.to(memory_format=torch.contiguous_format).float()
+    else:
+        uncond = torch.zeros([0])
+
+    return {
+        "pixel_values": pixel_values,
+        "reference_image": reference_image,
+        "uncond": uncond,
     }
 
 
