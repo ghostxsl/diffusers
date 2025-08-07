@@ -20,7 +20,7 @@ for i, line in enumerate(tqdm(csv_list)):
         image = pipe(
             image=img,
             prompt=line[-1],
-            guidance_scale=3.5,
+            guidance_scale=2.5,
             height=16,
             width=9,
             num_inference_steps=50,
