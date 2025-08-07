@@ -44,7 +44,7 @@ __all__ = [
     'FluxT2IDataset', 'FluxPTDataset',
     'FLUXICImageDataset', 'FluxFillDataset', 'FluxAnyPTDataset',
     'FluxFillICT2IDataset', 'FluxTextPTDataset',
-    'WanFLF2VDataset',
+    'WanFLF2VDataset', 'FluxKontextDataset',
 ]
 
 
@@ -2666,5 +2666,53 @@ class WanFLF2VDataset(torch.utils.data.Dataset):
 
         example["uncond"] = torch.tensor(
             [[0.]]) if random.random() < self.prob_uncond else torch.tensor([[1.]])
+
+        return example
+
+
+class FluxKontextDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_file,
+    ):
+        self.metadata = self.get_metadata(dataset_file)
+        self._length = len(self.metadata)
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file):
+        print("Loading dataset...")
+        dataset_file = [a.strip() for a in dataset_file.split(',') if len(a.strip()) > 0]
+
+        data_list = {}
+        for file_ in dataset_file:
+            temp_list = load_file(file_)
+            if isinstance(temp_list, dict):
+                data_list.update(temp_list)
+            else:
+                raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
+        self.dataset_file = data_list
+
+        out_list = [
+            {"text_embedding": v["text_embedding"], "latents": v["latents"]}
+            for v in data_list.values()
+        ]
+
+        return out_list
+
+    def __getitem__(self, index):
+        example = {}
+        item = self.metadata[index]
+
+        text_embedding = torch.load(item['text_embedding'], weights_only=True)
+        example["prompt_embeds"] = text_embedding["prompt_embeds"]
+        example["pooled_prompt_embeds"] = text_embedding["pooled_prompt_embeds"]
+
+        latents = torch.load(item['latents'], weights_only=True)
+        example["image_latents"] = latents["image_latents"][0]
+        example["cond_image_latents"] = latents["cond_image_latents"][0]
+        example["latent_image_ids"] = latents["latent_image_ids"]
+        example["cond_image_ids"] = latents["cond_image_ids"]
 
         return example
