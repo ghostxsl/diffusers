@@ -16,3 +16,5 @@ scikit-image
 decord
 imageio-ffmpeg
 numpy==1.26.4
+retrying
+bytedtos
