@@ -1,0 +1,6 @@
+openai
+bytedtos
+bytedeuler
+byted_overpass_ad_creative_ai_capabilities
+byted_overpass_ad_creative_image_core_solution
+thriftpy2
