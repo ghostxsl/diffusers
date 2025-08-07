@@ -13,7 +13,8 @@ import numpy as np
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
-    'i2i_collate_fn', 'kolors_collate_fn', 'flux_collate_fn', 'flux_fill_collate_fn',
+    'i2i_collate_fn', 'kolors_collate_fn', 'flux_collate_fn',
+    'flux_fill_collate_fn', 'flux_kontext_collate_fn',
     'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file', 'csv_save',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5', 'crop_human_bbox',
@@ -285,6 +286,45 @@ def flux_fill_collate_fn(examples):
         "reference_pixel_values": reference_pixel_values,
         "input_ids": input_ids,
         "pooled_input_ids": pooled_input_ids,
+    }
+
+
+def flux_kontext_collate_fn(examples):
+    image_latents = torch.stack([example["image_latents"] for example in examples])
+    image_latents = image_latents.to(memory_format=torch.contiguous_format)
+
+    cond_image_latents = torch.stack([example["cond_image_latents"] for example in examples])
+    cond_image_latents = cond_image_latents.to(memory_format=torch.contiguous_format)
+
+    if 'pooled_prompt_embeds' in examples[0]:
+        pooled_prompt_embeds = torch.cat([example["pooled_prompt_embeds"] for example in examples])
+    else:
+        pooled_prompt_embeds = torch.zeros([0])
+
+    if 'prompt_embeds' in examples[0]:
+        prompt_embeds = torch.cat([example["prompt_embeds"] for example in examples])
+    else:
+        prompt_embeds = torch.zeros([0])
+
+    if 'latent_image_ids' in examples[0]:
+        latent_image_ids = torch.cat([example["latent_image_ids"] for example in examples])
+        latent_image_ids = latent_image_ids.to(memory_format=torch.contiguous_format)
+    else:
+        latent_image_ids = torch.zeros([0])
+
+    if 'cond_image_ids' in examples[0]:
+        cond_image_ids = torch.cat([example["cond_image_ids"] for example in examples])
+        cond_image_ids = cond_image_ids.to(memory_format=torch.contiguous_format)
+    else:
+        cond_image_ids = torch.zeros([0])
+
+    return {
+        "image_latents": image_latents,
+        "cond_image_latents": cond_image_latents,
+        "pooled_prompt_embeds": pooled_prompt_embeds,
+        "prompt_embeds": prompt_embeds,
+        "latent_image_ids": latent_image_ids,
+        "cond_image_ids": cond_image_ids,
     }
 
 
