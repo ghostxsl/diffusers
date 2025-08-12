@@ -5,13 +5,15 @@ import base64
 import hashlib
 import time
 import traceback
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageOps
 from io import BytesIO
 
 
 __all__ = [
     'encode_pil_bytes', 'decode_pil_bytes',
     'download_pil_image', 'upload_pil_image',
+    'load_or_download_image',
 ]
 
 
@@ -94,6 +96,30 @@ def upload_pil_image(img_path, img_data, retry_times=3):
                 raise Exception(traceback.format_exc())
             else:
                 continue
+
+
+def load_or_download_image(image_path):
+    if isinstance(image_path, str):
+        image = download_pil_image(image_path) if image_path.startswith('http') else Image.open(image_path)
+    elif isinstance(image_path, Image.Image):
+        image = image_path
+    else:
+        raise ValueError(
+            "Incorrect format used for image. Should be a local path to an image, or a PIL image."
+        )
+
+    image = ImageOps.exif_transpose(image)
+    if image.mode == "RGBA":
+        # returning an RGB mode image with no transparency
+        image = Image.fromarray(np.array(image)[..., :3])
+    elif image.mode != "RGB":
+        # Fix UserWarning for palette images with transparency
+        if "transparency" in image.info:
+            image = image.convert("RGBA")
+            image = Image.fromarray(np.array(image)[..., :3])
+        image = image.convert("RGB")
+
+    return image
 
 
 if __name__ == "__main__":

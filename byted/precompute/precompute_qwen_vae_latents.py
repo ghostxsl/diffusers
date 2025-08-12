@@ -6,31 +6,10 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from diffusers import AutoencoderKL
+from diffusers.models import AutoencoderKLQwenImage
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.data.utils import load_file
-from diffusers.utils.vip_utils import load_image
-
-
-PREFERRED_KONTEXT_RESOLUTIONS = [
-    (672, 1568),
-    (688, 1504),
-    (720, 1456),
-    (752, 1392),
-    (800, 1328),
-    (832, 1248),
-    (880, 1184),
-    (944, 1104),
-    (1024, 1024),
-    (1104, 944),
-    (1184, 880),
-    (1248, 832),
-    (1328, 800),
-    (1392, 752),
-    (1456, 720),
-    (1504, 688),
-    (1568, 672),
-]
+from diffusers.data.outer_vos_tools import load_or_download_image
 
 
 def parse_args():
@@ -48,13 +27,13 @@ def parse_args():
     parser.add_argument(
         "--vae_model_path",
         type=str,
-        default="/mnt/bn/ttcc-algo-bytenas/zjn/models/FLUX.1-Kontext-dev/vae",
+        default="/mnt/bn/ttcc-algo-bytenas/xsl/Qwen-Image/vae",
     )
 
     parser.add_argument(
         "--resolution",
         type=str,
-        default="1024x1024",
+        default="1280x720",
         help=(
             "The resolution(h x w) for input images, all the images"
             " will be resized to this resolution."
@@ -103,20 +82,6 @@ def parse_args():
     return args
 
 
-def prepare_latent_image_ids(height, width, device=torch.device('cpu'), dtype=torch.float32):
-    latent_image_ids = torch.zeros(height, width, 3)
-    latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
-    latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
-
-    latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
-
-    latent_image_ids = latent_image_ids.reshape(
-        latent_image_id_height * latent_image_id_width, latent_image_id_channels
-    )
-
-    return latent_image_ids.to(device=device, dtype=dtype)
-
-
 def get_aspect_ratio_size(size, max_size=(1024, 1024), mod_value=16):
     w, h = size
     max_area = max_size[0] * max_size[1]
@@ -127,10 +92,10 @@ def get_aspect_ratio_size(size, max_size=(1024, 1024), mod_value=16):
 
 
 @torch.no_grad()
-def flux_encode_vae_image(vae, image):
+def qwen_encode_vae_image(vae, image, latents_mean, latents_std):
     image_latents = vae.encode(image).latent_dist.mode()
 
-    image_latents = (image_latents - vae.config.shift_factor) * vae.config.scaling_factor
+    image_latents = (image_latents - latents_mean) * latents_std
 
     return image_latents
 
@@ -140,8 +105,10 @@ def main(args):
     dtype = args.dtype
 
     image_processor = VaeImageProcessor()
-    vae = AutoencoderKL.from_pretrained(args.vae_model_path).to(device, dtype=dtype)
+    vae = AutoencoderKLQwenImage.from_pretrained(args.vae_model_path).to(device, dtype=dtype)
     vae.requires_grad_(False)
+    latents_mean = (torch.tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)).to(device, dtype)
+    latents_std = 1.0 / torch.tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1).to(device, dtype)
 
     # load data list
     img_list = load_file(args.input_file)
@@ -156,39 +123,28 @@ def main(args):
     for item in tqdm(img_list):
         try:
             # 1. load poster image
-            image = load_image(item['poster'])
+            poster_url = item[-4]
+            image = load_or_download_image(poster_url)
             size = get_aspect_ratio_size(image.size, max_size=args.resolution)
             image = image.resize(size, 1)
             init_image = image_processor.preprocess(image, width=size[0], height=size[1])
             # 1.1 flux image vae encode
-            init_latents = flux_encode_vae_image(vae, init_image.to(vae.device, dtype=vae.dtype))
-            init_latents = init_latents.cpu()
-            # 1.2 latents image ids
-            latent_ids = prepare_latent_image_ids(
-                init_latents.shape[2] // 2, init_latents.shape[3] // 2)
+            init_image = init_image.unsqueeze(2).to(vae.device, dtype=vae.dtype)
+            init_latents = qwen_encode_vae_image(vae, init_image, latents_mean, latents_std)
+            init_latents = init_latents.squeeze(2).cpu()
 
             # 2. load reference image
-            cond_image = load_image(item['bg'])
-            aspect_ratio = cond_image.width / cond_image.height
-            _, image_width, image_height = min(
-                (abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS
-            )
-            cond_image = cond_image.resize((image_width, image_height), 1)
-            cond_image = image_processor.preprocess(cond_image, width=image_width, height=image_height)
+            cond_image = load_or_download_image(item[-1])
+            cond_image = image_processor.preprocess(cond_image, width=cond_image.width, height=cond_image.height)
             # 2.1 reference image vae encode
-            cond_latents = flux_encode_vae_image(vae, cond_image.to(vae.device, dtype=vae.dtype))
-            cond_latents = cond_latents.cpu()
-            # 2.2 reference image ids
-            cond_ids = prepare_latent_image_ids(
-                cond_latents.shape[2] // 2, cond_latents.shape[3] // 2)
-            cond_ids[:, 0] = 1
+            cond_image = cond_image.unsqueeze(2).to(vae.device, dtype=vae.dtype)
+            cond_latents = qwen_encode_vae_image(vae, cond_image, latents_mean, latents_std)
+            cond_latents = cond_latents.squeeze(2).cpu()
 
-            save_name = basename(item['poster']).split('_')[0] + '.latents'
+            save_name = basename(poster_url) + '.latents'
             save_latents = {
                 "image_latents": init_latents,
                 "cond_image_latents": cond_latents,
-                "latent_image_ids": latent_ids,
-                "cond_image_ids": cond_ids,
             }
             torch.save(save_latents, join(args.save_dir, save_name))
         except Exception as e:

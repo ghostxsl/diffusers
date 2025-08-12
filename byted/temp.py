@@ -103,3 +103,42 @@ print('done')
 # code, msg, url = renderUrl2CarouselSingleHtml("/t2d_demo", f"xsl_exp_{time.time()}.html", json.dumps(html_result))
 # print(url)
 # print('done')
+
+
+# # OCR
+# from diffusers.data.clients.creative_ai_capability import image_ocr_to_bbox
+
+# token = os.popen("doas -p ad.creative.image_core_solution printenv SEC_TOKEN_STRING|tail -1 ").read()
+# os.environ["SEC_TOKEN_STRING"] = token  # os.environ['SEC_TOKEN_STRING'] = "toutiao.growth.xenon"
+# if len(os.getenv("SEC_TOKEN_STRING", "")) < 1:
+#     token = os.popen("cat /tmp/identity.token").read()
+#     os.environ["SEC_TOKEN_STRING"] = token
+# os.environ["SEC_KV_AUTH"] = "1"
+
+# df = pd.read_csv("generate_poster_data_20250814_v2.csv", encoding='utf-8')
+# row_dict = df.to_dict('records')
+
+# for line in tqdm(row_dict):
+#     url = line['final_poster_url']
+#     result = image_ocr_to_bbox([url])[0]
+#     result_product_name = line['result_product_name']
+#     result_primary_selling_points = eval(line['result_primary_selling_points'])[0]
+#     result_secondary_selling_points = eval(line['result_secondary_selling_points'])
+#     for item in result:
+#         if item['text'] in result_product_name:
+#             continue
+#         if item['text'] in result_primary_selling_points:
+#             continue
+#         for secondary_selling_point in result_secondary_selling_points:
+#             if item['text'] in secondary_selling_point:
+#                 line['select_secondary_selling_point'] = secondary_selling_point
+#                 break
+#         if 'select_secondary_selling_point' in line:
+#             break
+#     if 'select_secondary_selling_point' not in line:
+#         line['select_secondary_selling_point'] = ''
+
+# df = pd.DataFrame(row_dict)
+# df.to_excel("generate_poster_data_20250814_v2_ocr.xlsx", index=False)
+
+# print('done')
