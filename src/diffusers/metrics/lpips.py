@@ -13,7 +13,7 @@ class LPIPSMetric(object):
         self.model = lpips.LPIPS(net=net).to(self.device)
 
     @torch.no_grad()
-    def __call__(self, image_1, image_2, normalize=False):
+    def __call__(self, image_1, image_2, normalize=True):
         """
             image_1: images with size (n, 3, w, h) with value [-1, 1]
             image_2: images with size (n, 3, w, h) with value [-1, 1]
