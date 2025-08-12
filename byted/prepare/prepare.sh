@@ -1,3 +1,12 @@
+#!/bin/bash
+
 sudo apt-get update
 sudo apt-get install -y libgl1 libglx0 mesa-utils
 pip install -U pip
+pip install -r byted/requirements.txt
+pip install deepspeed
+
+pip install -v -e .
+
+python byted/prepare/prepare_accelerate.py
+echo "accelerate config done"

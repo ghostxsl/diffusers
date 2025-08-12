@@ -77,6 +77,23 @@ def save_tos(content, object_name=None, folder_name="", overwrite=True, va=False
     return url
 
 
+def get_file_from_tos(url):
+    if url.startswith(url_prefix_va):
+        cli = tos_client_va
+        prefix_url = url_prefix_va
+    else:
+        cli = tos_client
+        prefix_url = url_prefix
+
+    object_name = url.replace(prefix_url, "")
+    try:
+        result = cli.get_object(object_name)
+    except Exception:
+        raise Exception('Error: get object failed.')
+
+    return result
+
+
 def make_key(psm="ad.creative.image_core_solution"):
     """
     生成 tos 存储的 key，形如：201804085d0d982eb246e3b5cba746e8

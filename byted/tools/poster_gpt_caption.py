@@ -1,8 +1,10 @@
+# Copyright (c) wilson.xu. All rights reserved.
 import argparse
 from tqdm import tqdm
 import pandas as pd
 
-from diffusers.data.openai.azure_mllm import MLLMClient
+from diffusers.data.clients.azure_mllm import MLLMClient
+from diffusers.data.utils import xlsx_save, load_csv_or_xlsx_to_dict
 
 
 def parse_args():
@@ -69,14 +71,7 @@ def get_gpt_caption(image_url, product_name, primary_selling_point, secondary_se
 
 
 def main(args):
-    if args.input_file.endswith('.xlsx'):
-        df = pd.read_excel(args.input_file)
-    elif args.input_file.endswith('.csv'):
-        df = pd.read_csv(args.input_file, encoding='utf-8')
-    else:
-        raise Exception(f"Error `input_file` type:{args.input_file}")
-
-    row_dict = df.to_dict('records')
+    row_dict = load_csv_or_xlsx_to_dict(args.input_file)
 
     for i, line in tqdm(enumerate(row_dict)):
         img_with_bg_url = line['bg_res_url']
@@ -90,8 +85,7 @@ def main(args):
         except Exception as e:
             print(i, img_with_bg_url, e)
 
-    df = pd.DataFrame(row_dict)
-    df.to_excel(args.save_file, index=False)
+    xlsx_save(row_dict, args.save_file)
 
 
 if __name__ == '__main__':
