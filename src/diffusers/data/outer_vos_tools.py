@@ -5,13 +5,18 @@ import base64
 import hashlib
 import time
 import traceback
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageOps
 from io import BytesIO
+from tqdm import tqdm
+import concurrent
+from concurrent.futures import ThreadPoolExecutor
 
 
 __all__ = [
     'encode_pil_bytes', 'decode_pil_bytes',
     'download_pil_image', 'upload_pil_image',
+    'load_or_download_image', 'download_images_multithreading',
 ]
 
 
@@ -26,9 +31,10 @@ HEADERS = {
 
 
 def encode_pil_bytes(img, to_string=True, format='JPEG', quality=90):
-    buf = BytesIO()
-    img.save(buf, format=format, quality=quality)
-    img_bytes = buf.getvalue()
+    with BytesIO() as buf:
+        img.save(buf, format=format, quality=quality)
+        img_bytes = buf.getvalue()
+
     if to_string:
         return base64.b64encode(img_bytes).decode('utf-8')
     return img_bytes
@@ -46,11 +52,11 @@ def download_pil_image(url, retry_times=3):
             content = requests.get(url, timeout=3, headers=HEADERS).content
             image = Image.open(BytesIO(content))
             return image
-        except Exception as e:
+        except Exception:
             if i == retry_times - 1:
                 raise Exception(traceback.format_exc())
             else:
-                continue
+                time.sleep(0.4)
 
 
 def _md5_sign(params, secret):
@@ -94,6 +100,43 @@ def upload_pil_image(img_path, img_data, retry_times=3):
                 raise Exception(traceback.format_exc())
             else:
                 continue
+
+
+def load_or_download_image(image_path):
+    if isinstance(image_path, str):
+        image = download_pil_image(image_path) if image_path.startswith('http') else Image.open(image_path)
+    elif isinstance(image_path, Image.Image):
+        image = image_path
+    else:
+        raise ValueError(
+            "Incorrect format used for image. Should be a local path to an image, or a PIL image."
+        )
+
+    image = ImageOps.exif_transpose(image)
+    if image.mode == "RGBA":
+        # returning an RGB mode image with no transparency
+        image = Image.fromarray(np.array(image)[..., :3])
+    elif image.mode != "RGB":
+        # Fix UserWarning for palette images with transparency
+        if "transparency" in image.info:
+            image = image.convert("RGBA")
+            image = Image.fromarray(np.array(image)[..., :3])
+        image = image.convert("RGB")
+
+    return image
+
+
+def download_images_multithreading(image_urls, num_workers=8):
+    out_list = []
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_list = [executor.submit(load_or_download_image, img_url) for img_url in image_urls]
+        with tqdm(total=len(image_urls)) as pbar:
+            for future in concurrent.futures.as_completed(future_list):
+                img = future.result()
+                pbar.update(1)  # Update progress bar
+                out_list.append(img)
+
+    return out_list
 
 
 if __name__ == "__main__":
