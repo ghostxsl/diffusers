@@ -1,6 +1,7 @@
 # Copyright (c) wilson.xu. All rights reserved.
 import os
 from os.path import join, exists, split, splitext
+import re
 import hashlib
 import cv2
 import math
@@ -8,17 +9,23 @@ import torch
 import json
 import pickle
 import pandas
+import regex
+import string
 import matplotlib
 import numpy as np
+from PIL import Image
+
 
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
     'i2i_collate_fn', 'kolors_collate_fn', 'flux_collate_fn',
     'flux_fill_collate_fn', 'flux_kontext_collate_fn',
-    'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file', 'csv_save',
+    'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
+    'csv_save', 'xlsx_save', 'load_csv_or_xlsx_to_dict',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5', 'crop_human_bbox',
     'compute_OKS',
+    'get_bbox_from_mask',
 ]
 
 
@@ -306,6 +313,11 @@ def flux_kontext_collate_fn(examples):
     else:
         prompt_embeds = torch.zeros([0])
 
+    if 'prompt_embeds_mask' in examples[0]:
+        prompt_embeds_mask = torch.cat([example["prompt_embeds_mask"] for example in examples])
+    else:
+        prompt_embeds_mask = torch.zeros([0])
+
     if 'latent_image_ids' in examples[0]:
         latent_image_ids = torch.cat([example["latent_image_ids"] for example in examples])
         latent_image_ids = latent_image_ids.to(memory_format=torch.contiguous_format)
@@ -325,6 +337,7 @@ def flux_kontext_collate_fn(examples):
         "prompt_embeds": prompt_embeds,
         "latent_image_ids": latent_image_ids,
         "cond_image_ids": cond_image_ids,
+        "prompt_embeds_mask": prompt_embeds_mask,
     }
 
 
@@ -363,9 +376,27 @@ def load_file(file_path):
         return pkl_load(file_path)
 
 
-def csv_save(obj, file):
+def csv_save(obj, file, mode="w"):
     df = pandas.DataFrame(obj)
-    df.to_csv(file, mode='a', index=False, header=not exists(file))
+    header = True
+    if mode == "a":
+        header = not exists(file)
+    df.to_csv(file, mode=mode, index=False, header=header, encoding='utf-8')
+
+
+def xlsx_save(obj, file):
+    df = pandas.DataFrame(obj)
+    df.to_excel(file, index=False)
+
+
+def load_csv_or_xlsx_to_dict(file_path):
+    if file_path.endswith('.xlsx'):
+        df = pandas.read_excel(file_path)
+    elif file_path.endswith('.csv'):
+        df = pandas.read_csv(file_path, encoding='utf-8')
+    else:
+        raise Exception(f"Error `file_path` type:{file_path}")
+    return df.to_dict('records')
 
 
 def draw_bodypose(canvas, kpts, kpt_valid, stickwidth=4,
@@ -606,3 +637,161 @@ def compute_OKS(gt_kpts, gt_bboxes, dt_kpts, kpt_thr=0.3, perfect_match=True):
             ious[i, not_same_dts_ind] -= 1.
 
     return ious
+
+
+def get_bbox_from_mask(mask):
+    assert isinstance(mask, np.ndarray) and mask.ndim == 2
+
+    x = np.where(np.sum(mask, axis=0))[0]
+    y = np.where(np.sum(mask, axis=1))[0]
+    if len(x) > 1 and len(y) > 1:
+        x1, y1, x2, y2 = int(x[0]), int(y[0]), int(x[-1]) + 1, int(y[-1]) + 1
+        return [x1, y1, x2, y2]
+    else:
+        return None
+
+
+def remove_punctuation(input_str):
+    # 1. \p{P} 匹配所有Unicode标点符号
+    temp = regex.sub(r'\p{P}', ' ', input_str)
+
+    # 2. 再使用string.punctuation中的标点进行二次替换
+    # 确保覆盖当前Python版本定义的所有标点（包括可能未被\p{P}覆盖的）
+    punct_pattern = regex.compile(f"[{regex.escape(string.punctuation + '™°一º©®★')}]")
+    return punct_pattern.sub(' ', temp)
+
+
+def full_to_half(text):
+    # 先处理全角空格
+    text = text.replace('　', ' ')
+    # 再处理其他全角字符
+    return re.sub(r'[Ａ-Ｚａ-ｚ０-９！-～]', lambda x: chr(ord(x.group(0)) - 65248), text)
+
+
+def is_english(input_text):
+    """
+    判断输入的文本是否为英文（忽略所有标点符号、数字及特定特殊字符）
+
+    参数:
+        input_text: 待检查的文本字符串
+
+    返回:
+        True: 如果文本是英文
+        False: 如果文本包含非英文字符
+    """
+    # 定义需要忽略的特殊字符
+    ignored_special_chars = {'°', '®', '™'}
+
+    # 检查字符串中的每个字符
+    for char in input_text:
+        # 检查是否是英文字母（大小写）- 允许
+        if 'A' <= char <= 'Z' or 'a' <= char <= 'z':
+            continue
+        # 检查是否是数字（0-9）- 忽略
+        if '0' <= char <= '9':
+            continue
+        # 检查是否是需要忽略的特殊字符
+        if char in ignored_special_chars:
+            continue
+        # 所有其他字符都视为需要检查的字符
+        # 如果字符不是英文字母、数字或忽略的特殊字符
+        # 且不在基本拉丁符号范围内（即可能是非英文字符）
+        if not (0x0020 <= ord(char) <= 0x007E):
+            return False
+    # 所有字符都检查通过
+    return True
+
+
+def pad_image(image, padding, fill_color=(255, 255, 255)):
+    """
+    为图像添加填充
+
+    参数:
+        image: PIL Image对象
+        padding: 填充大小，可以是一个整数(四周填充相同大小)或元组(左,右,上,下)
+        fill_color: 填充区域的颜色，默认为白色(255,255,255)
+
+    返回:
+        填充后的PIL Image对象
+    """
+    # 处理填充参数
+    if isinstance(padding, int):
+        left = right = top = bottom = padding
+    else:
+        left, right, top, bottom = padding
+
+    # 获取原图尺寸
+    width, height = image.size
+
+    # 计算新图像尺寸
+    new_width = width + left + right
+    new_height = height + top + bottom
+
+    # 创建新图像，使用指定颜色填充
+    new_image = Image.new(image.mode, (new_width, new_height), fill_color)
+
+    # 将原图粘贴到新图像的指定位置
+    new_image.paste(image, (left, top))
+
+    return new_image
+
+
+def get_product_and_mask_image(image, mask_image, padding=0, fill_color=(255, 255, 255)):
+    mask_image = np.array(mask_image.convert('L'))
+    bbox = get_bbox_from_mask(mask_image)
+
+    mask = np.float32(mask_image[..., None]) / 255
+    product_image = mask * np.array(image, dtype=np.float32) + (1 - mask) * 255
+    product_image = np.uint8(np.clip(product_image, 0, 255))
+
+    x1, y1, x2, y2 = bbox
+    product_image = Image.fromarray(product_image[y1: y2, x1: x2])
+    if padding > 0:
+        product_image = pad_image(product_image, padding, fill_color)
+
+    mask_image = Image.fromarray(mask_image[y1: y2, x1: x2])
+    if padding > 0:
+        mask_image = pad_image(mask_image, padding, 0)
+    return product_image, mask_image
+
+
+def rm_image_border(image, upper=240, lower=15):
+    image = np.array(image)
+    # 转换成灰度图
+    mean_img = np.mean(image, axis=-1)
+    # 裁剪白边
+    x = np.where(np.mean(mean_img, axis=0) < upper)[0]
+    y = np.where(np.mean(mean_img, axis=1) < upper)[0]
+    if len(x) > 1 and len(y) > 1:
+        x1, y1, x2, y2 = int(x[0]), int(y[0]), int(x[-1]) + 1, int(y[-1]) + 1
+    else:
+        raise Exception("The whole picture is white, check the input image.")
+    mean_img = mean_img[y1:y2, x1:x2]
+    image = image[y1:y2, x1:x2]
+
+    # 裁剪黑边
+    x = np.where(np.mean(mean_img, axis=0) > lower)[0]
+    y = np.where(np.mean(mean_img, axis=1) > lower)[0]
+    if len(x) > 1 and len(y) > 1:
+        x1, y1, x2, y2 = int(x[0]), int(y[0]), int(x[-1]) + 1, int(y[-1]) + 1
+    else:
+        raise Exception("The whole picture is black, check the input image.")
+    image = image[y1:y2, x1:x2]
+
+    return Image.fromarray(image)
+
+
+def resize_image_by_short_side(img, size=1024):
+    width, height = img.size
+    short_side = min(width, height)
+
+    if short_side <= size:
+        return img
+
+    # 计算缩放比例
+    scale = size / short_side
+    new_width = int(round(width * scale))
+    new_height = int(round(height * scale))
+
+    resized_img = img.resize((new_width, new_height), 1)
+    return resized_img

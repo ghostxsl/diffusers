@@ -3,7 +3,6 @@ import argparse
 import os
 from os.path import join, splitext, basename, exists
 import torch
-from PIL import Image
 import numpy as np
 from tqdm import tqdm
 
@@ -47,7 +46,7 @@ def parse_args():
         type=str,
         help="Directory to save.")
     parser.add_argument(
-        "--vae_flux_model_path",
+        "--vae_model_path",
         type=str,
         default="/mnt/bn/ttcc-algo-bytenas/zjn/models/FLUX.1-Kontext-dev/vae",
     )
@@ -141,7 +140,8 @@ def main(args):
     dtype = args.dtype
 
     image_processor = VaeImageProcessor()
-    vae = AutoencoderKL.from_pretrained(args.vae_flux_model_path).to(device, dtype=dtype)
+    vae = AutoencoderKL.from_pretrained(args.vae_model_path).to(device, dtype=dtype)
+    vae.requires_grad_(False)
 
     # load data list
     img_list = load_file(args.input_file)
