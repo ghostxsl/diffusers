@@ -220,136 +220,188 @@
 # plt.savefig('overall_distribution_ctr.png', dpi=300, bbox_inches='tight')
 
 
-import matplotlib.pyplot as plt
-import numpy as np
 
-# 固定字体设置（避免乱码）
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+import json
+from bytedance.creative_tools.debug.generic_call import send_request
+# request_dict = {
+#     "generate_image_url": "https://sf16-muse-va.ibytedtos.com/obj/ad-creative/1775621580.553408_0894bb1b-9f37-45e6-b27b-33856ef8439c?t=1775632051356",
+#     "origin_image_url": "https://p16-oec-sg.ibyteimg.com/tos-alisg-i-aphluv4xwc-sg/132c1be62e444d018a646a86ee12043f~tplv-aphluv4xwc-origin-jpeg.jpeg?dr=15568&nonce=74601&refresh_token=5504be0ee36cb8856222bdeed18b719e&from=1010592719&idc=my2&ps=933b5bde&shcp=9b759fb9&shp=3c3c6bcf&t=555f072d&t=1775632051356",
+#     "check_text_list": [
+#         "Gel dan wax 2in1",
+#         "Pegangan kuat"
+#     ],
+# }
+# resp = send_request(
+#     psm="ad.creative.image_core_solution",
+#     method="OCRQualityControl",
+#     request_dict=request_dict,
+#     idc="my",
+#     env="prod",
+#     cluster="default",
+#     timeout=60,
+# )
 
-# 1. 新版曝光量分桶数据（精准提取自你的最新数据）
-filter_conditions = [
-    '0 ≤ show < 10',
-    '10 ≤ show < 30',
-    '30 ≤ show < 80',
-    '80 ≤ show < 200',
-    'show ≥ 200'
-]
-# 各分桶下的样本量（origin num）+ 占比
-quantity = [209100, 118678, 86118, 48696, 36158]
-quantity_ratio = ['41.92%', '23.80%', '17.27%', '9.76%', '7.25%']
+#
+request_dict = {"request_body": json.dumps({"query": "A beautiful red evening dress, suitable for parties."})}
+resp = send_request(
+    psm="ad.creative.qwen_image_v1",
+    method="AiModel",
+    request_dict=request_dict,
+    cluster="ref_embedding",
+    idc="my2",
+    env="",
+    timeout=60,
+)
+print(resp)
 
-# CTR 数据
-origin_ctr = [3.4562, 3.8198, 3.6346, 3.1661, 1.7890]
-generate_ctr = [4.3951, 4.1103, 3.7233, 3.2242, 1.8260]
-relative_ctr = [27.17, 7.61, 2.44, 1.84, 2.07]
+from diffusers.data.outer_vos_tools import load_or_download_image, encode_pil_bytes
+img = load_or_download_image("/Users/bytedance/Downloads/1.jpeg")
+request_dict = {"file_bytes": encode_pil_bytes(img, True), "is_valid": False}
+resp = send_request(
+    psm="ad.creative.psa",
+    method="UploadFileTos",
+    request_dict=request_dict,
+    cluster="default",
+    idc="sg1",
+    env="prod",
+    timeout=60,
+)
+print(resp)
 
-# CVR 数据
-origin_cvr = [2.4821, 2.6200, 2.6353, 2.6598, 3.0105]
-generate_cvr = [2.3607, 2.4327, 2.5348, 2.6740, 2.9506]
-relative_cvr = [-4.89, -7.15, -3.81, 0.53, -1.99]
 
-# CTCVR 数据
-origin_ctcvr = [0.0858, 0.1001, 0.0958, 0.0842, 0.0539]
-generate_ctcvr = [0.1038, 0.1000, 0.0944, 0.0862, 0.0539]
-relative_ctcvr = [20.98, -0.10, -1.46, 2.38, 0.00]
 
-# GMV 数据（单位：十亿，便于展示）
-origin_gmv = [6.47, 17.46, 33.35, 36.36, 100.97]
-generate_gmv = [9.89, 18.62, 31.18, 38.13, 98.32]
-relative_gmv = [52.90, 6.64, -6.50, 4.88, -2.62]
 
-# 2. 循环生成四个指标的图表
-metrics = [
-    ("CTR", origin_ctr, generate_ctr, relative_ctr, 1.6, 4.6, -2, 30),
-    ("CVR", origin_cvr, generate_cvr, relative_cvr, 2.2, 3.2, -9, 2),
-    ("CTCVR", origin_ctcvr, generate_ctcvr, relative_ctcvr, 0.05, 0.11, -3, 23),
-    ("GMV (Billion)", origin_gmv, generate_gmv, relative_gmv, 4, 105, -8, 55)
-]
 
-for metric_name, origin_data, generate_data, relative_data, y_min, y_max, rel_min, rel_max in metrics:
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True,
-                                   gridspec_kw={'height_ratios': [3, 1]})
-    fig.suptitle(f'Overall Distribution - {metric_name}, Relative Trend and Quantity',
-                 fontsize=14, fontweight='bold')
-
-    x = np.arange(len(filter_conditions))
-    width = 0.35
-
-    # 上层子图：柱状图 + 折线图
-    bars1 = ax1.bar(x - width/2, origin_data, width, label=f'origin {metric_name}', color='#1f77b4')
-    bars2 = ax1.bar(x + width/2, generate_data, width, label=f'generate {metric_name}', color='#ff7f0e')
-
-    ax1_twin = ax1.twinx()
-    line = ax1_twin.plot(x, relative_data, color='#d62728', marker='o', linewidth=2,
-                         markersize=6, label=f'Relative {metric_name}')
-
-    # 数值标注
-    for bar in bars1:
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height + (y_max - y_min)*0.01,
-                 f'{height:.4f}' if metric_name == "CTCVR" else f'{height:.2f}',
-                 ha='center', va='bottom', fontsize=9, fontweight='medium')
-    for bar in bars2:
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height + (y_max - y_min)*0.01,
-                 f'{height:.4f}' if metric_name == "CTCVR" else f'{height:.2f}',
-                 ha='center', va='bottom', fontsize=9, fontweight='medium')
-
-    for i, val in enumerate(relative_data):
-        offset = 0.8 if val >= 0 else -0.8  # 适配大数值偏移
-        ax1_twin.text(i, val + offset,
-                      f'{val:.2f}%', ha='center', va='bottom' if val >= 0 else 'top',
-                      color='#d62728', fontsize=9, fontweight='medium')
-
-    # 上层样式设置
-    ax1.set_ylabel(f'{metric_name} (%)' if metric_name != "GMV (Billion)" else f'{metric_name}', fontsize=12)
-    ax1_twin.set_ylabel(f'Relative {metric_name} (%)', fontsize=12, color='#d62728')
-    ax1_twin.tick_params(axis='y', labelcolor='#d62728')
-    ax1.set_ylim(y_min, y_max)
-    ax1_twin.set_ylim(rel_min, rel_max)
-    ax1.grid(axis='y', alpha=0.3, linestyle='--')
-
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax1_twin.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', framealpha=0.9)
-
-    # 下层子图：数量柱状图（显示数量+占比）
-    bars3 = ax2.bar(x, quantity, color='#2ca02c', width=0.8)
-    ax2.set_ylabel('Quantity', fontsize=12)
-    ax2.set_ylim(0, max(quantity) * 1.15)  # 调整Y轴范围，避免标注超出
-    ax2.grid(axis='y', alpha=0.3, linestyle='--')
-
-    # 数量+占比标注
-    for i, bar in enumerate(bars3):
-        height = bar.get_height()
-        label_text = f'{int(height)} ({quantity_ratio[i]})'
-        ax2.text(bar.get_x() + bar.get_width()/2., height + max(quantity)*0.02,
-                 label_text, ha='center', va='bottom', fontsize=9, fontweight='medium')
-
-    # X轴设置
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(filter_conditions, rotation=0, ha='center', fontsize=10)
-
-    plt.tight_layout()
-    plt.savefig(f'exposure_binning_new_{metric_name.lower()}_distribution.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-# 额外生成新版分桶的数量占比饼图
-fig, ax = plt.subplots(figsize=(10, 8))
-wedges, texts, autotexts = ax.pie(quantity, labels=filter_conditions, autopct='%1.2f%%',
-                                  startangle=90, colors=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
-ax.set_title('Exposure Bins (New) - Quantity Distribution', fontsize=14, fontweight='bold')
-
-# 美化饼图标注
-for autotext in autotexts:
-    autotext.set_color('white')
-    autotext.set_fontweight('bold')
-    autotext.set_fontsize(10)
-
-plt.tight_layout()
-plt.savefig('exposure_binning_new_quantity_pie.png', dpi=300, bbox_inches='tight')
-plt.close()
+# import matplotlib.pyplot as plt
+# import numpy as np
+#
+# # 固定字体设置（避免乱码）
+# plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+# plt.rcParams['axes.unicode_minus'] = False
+#
+# # 1. 新版曝光量分桶数据（精准提取自你的最新数据）
+# filter_conditions = [
+#     '0 ≤ show < 10',
+#     '10 ≤ show < 30',
+#     '30 ≤ show < 80',
+#     '80 ≤ show < 200',
+#     'show ≥ 200'
+# ]
+# # 各分桶下的样本量（origin num）+ 占比
+# quantity = [209100, 118678, 86118, 48696, 36158]
+# quantity_ratio = ['41.92%', '23.80%', '17.27%', '9.76%', '7.25%']
+#
+# # CTR 数据
+# origin_ctr = [3.4562, 3.8198, 3.6346, 3.1661, 1.7890]
+# generate_ctr = [4.3951, 4.1103, 3.7233, 3.2242, 1.8260]
+# relative_ctr = [27.17, 7.61, 2.44, 1.84, 2.07]
+#
+# # CVR 数据
+# origin_cvr = [2.4821, 2.6200, 2.6353, 2.6598, 3.0105]
+# generate_cvr = [2.3607, 2.4327, 2.5348, 2.6740, 2.9506]
+# relative_cvr = [-4.89, -7.15, -3.81, 0.53, -1.99]
+#
+# # CTCVR 数据
+# origin_ctcvr = [0.0858, 0.1001, 0.0958, 0.0842, 0.0539]
+# generate_ctcvr = [0.1038, 0.1000, 0.0944, 0.0862, 0.0539]
+# relative_ctcvr = [20.98, -0.10, -1.46, 2.38, 0.00]
+#
+# # GMV 数据（单位：十亿，便于展示）
+# origin_gmv = [6.47, 17.46, 33.35, 36.36, 100.97]
+# generate_gmv = [9.89, 18.62, 31.18, 38.13, 98.32]
+# relative_gmv = [52.90, 6.64, -6.50, 4.88, -2.62]
+#
+# # 2. 循环生成四个指标的图表
+# metrics = [
+#     ("CTR", origin_ctr, generate_ctr, relative_ctr, 1.6, 4.6, -2, 30),
+#     ("CVR", origin_cvr, generate_cvr, relative_cvr, 2.2, 3.2, -9, 2),
+#     ("CTCVR", origin_ctcvr, generate_ctcvr, relative_ctcvr, 0.05, 0.11, -3, 23),
+#     ("GMV (Billion)", origin_gmv, generate_gmv, relative_gmv, 4, 105, -8, 55)
+# ]
+#
+# for metric_name, origin_data, generate_data, relative_data, y_min, y_max, rel_min, rel_max in metrics:
+#     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True,
+#                                    gridspec_kw={'height_ratios': [3, 1]})
+#     fig.suptitle(f'Overall Distribution - {metric_name}, Relative Trend and Quantity',
+#                  fontsize=14, fontweight='bold')
+#
+#     x = np.arange(len(filter_conditions))
+#     width = 0.35
+#
+#     # 上层子图：柱状图 + 折线图
+#     bars1 = ax1.bar(x - width/2, origin_data, width, label=f'origin {metric_name}', color='#1f77b4')
+#     bars2 = ax1.bar(x + width/2, generate_data, width, label=f'generate {metric_name}', color='#ff7f0e')
+#
+#     ax1_twin = ax1.twinx()
+#     line = ax1_twin.plot(x, relative_data, color='#d62728', marker='o', linewidth=2,
+#                          markersize=6, label=f'Relative {metric_name}')
+#
+#     # 数值标注
+#     for bar in bars1:
+#         height = bar.get_height()
+#         ax1.text(bar.get_x() + bar.get_width()/2., height + (y_max - y_min)*0.01,
+#                  f'{height:.4f}' if metric_name == "CTCVR" else f'{height:.2f}',
+#                  ha='center', va='bottom', fontsize=9, fontweight='medium')
+#     for bar in bars2:
+#         height = bar.get_height()
+#         ax1.text(bar.get_x() + bar.get_width()/2., height + (y_max - y_min)*0.01,
+#                  f'{height:.4f}' if metric_name == "CTCVR" else f'{height:.2f}',
+#                  ha='center', va='bottom', fontsize=9, fontweight='medium')
+#
+#     for i, val in enumerate(relative_data):
+#         offset = 0.8 if val >= 0 else -0.8  # 适配大数值偏移
+#         ax1_twin.text(i, val + offset,
+#                       f'{val:.2f}%', ha='center', va='bottom' if val >= 0 else 'top',
+#                       color='#d62728', fontsize=9, fontweight='medium')
+#
+#     # 上层样式设置
+#     ax1.set_ylabel(f'{metric_name} (%)' if metric_name != "GMV (Billion)" else f'{metric_name}', fontsize=12)
+#     ax1_twin.set_ylabel(f'Relative {metric_name} (%)', fontsize=12, color='#d62728')
+#     ax1_twin.tick_params(axis='y', labelcolor='#d62728')
+#     ax1.set_ylim(y_min, y_max)
+#     ax1_twin.set_ylim(rel_min, rel_max)
+#     ax1.grid(axis='y', alpha=0.3, linestyle='--')
+#
+#     lines1, labels1 = ax1.get_legend_handles_labels()
+#     lines2, labels2 = ax1_twin.get_legend_handles_labels()
+#     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', framealpha=0.9)
+#
+#     # 下层子图：数量柱状图（显示数量+占比）
+#     bars3 = ax2.bar(x, quantity, color='#2ca02c', width=0.8)
+#     ax2.set_ylabel('Quantity', fontsize=12)
+#     ax2.set_ylim(0, max(quantity) * 1.15)  # 调整Y轴范围，避免标注超出
+#     ax2.grid(axis='y', alpha=0.3, linestyle='--')
+#
+#     # 数量+占比标注
+#     for i, bar in enumerate(bars3):
+#         height = bar.get_height()
+#         label_text = f'{int(height)} ({quantity_ratio[i]})'
+#         ax2.text(bar.get_x() + bar.get_width()/2., height + max(quantity)*0.02,
+#                  label_text, ha='center', va='bottom', fontsize=9, fontweight='medium')
+#
+#     # X轴设置
+#     ax2.set_xticks(x)
+#     ax2.set_xticklabels(filter_conditions, rotation=0, ha='center', fontsize=10)
+#
+#     plt.tight_layout()
+#     plt.savefig(f'exposure_binning_new_{metric_name.lower()}_distribution.png', dpi=300, bbox_inches='tight')
+#     plt.close()
+#
+# # 额外生成新版分桶的数量占比饼图
+# fig, ax = plt.subplots(figsize=(10, 8))
+# wedges, texts, autotexts = ax.pie(quantity, labels=filter_conditions, autopct='%1.2f%%',
+#                                   startangle=90, colors=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'])
+# ax.set_title('Exposure Bins (New) - Quantity Distribution', fontsize=14, fontweight='bold')
+#
+# # 美化饼图标注
+# for autotext in autotexts:
+#     autotext.set_color('white')
+#     autotext.set_fontweight('bold')
+#     autotext.set_fontsize(10)
+#
+# plt.tight_layout()
+# plt.savefig('exposure_binning_new_quantity_pie.png', dpi=300, bbox_inches='tight')
+# plt.close()
 
 
 
