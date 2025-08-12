@@ -103,10 +103,11 @@ def _process_json_response(result, model_name="gemini-2.5-flash"):
             raise Exception(f"`{model_name}` final JSON parsing failed, resp: {fixed_result}")
 
 
-def mllm_make_image_request(
+def mllm_make_image_dialogue_request(
     prompt="",
     image_urls=[],
     image_pils=[],
+    history_messages=[],
     thinking_budget=1024,
     max_tokens=4096,
     timeout=60,
@@ -121,32 +122,31 @@ def mllm_make_image_request(
     try:
         # 0. 创建client
         client = openai.AzureOpenAI(api_key=api_key, azure_endpoint=base_url, api_version="2024-03-01-preview")
-        # 1. 组装message
-        message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
+
+        # 1. 构建当前轮的message
+        current_message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
         if image_urls:
             for image_url in image_urls:
                 if is_download_image:
                     image = load_or_download_image(image_url)
-                    message["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_pil_bytes(image)}"}})
+                    current_message["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_pil_bytes(image)}"}})
                 else:
-                    message["content"].append({"type": "image_url", "image_url": {"url": image_url}})
+                    current_message["content"].append({"type": "image_url", "image_url": {"url": image_url}})
         elif image_pils:
             for image in image_pils:
-                message["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_pil_bytes(image)}"}})
-        else:
-            raise Exception(f"[{model_name}] Parameters `image_urls` and `image_pils` are both empty")
-        # 2. 设置extra_body
+                current_message["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_pil_bytes(image)}"}})
+        # 2. 组装完整 messages
+        messages = history_messages + [current_message]
+        # 3. 设置extra_body
         if "gemini" in model_name:
             extra_body = {"thinking": {"budget_tokens": thinking_budget, "include_thoughts": False}}
         else:
             extra_body = None
             temperature = 1.0
-        # 3. 请求大模型
+        # 4. 请求大模型
         response = client.chat.completions.create(
             model=model_name,
-            messages=[
-                message,
-            ],
+            messages=messages,
             stream=False,
             max_tokens=max_tokens,
             timeout=timeout,
@@ -154,16 +154,19 @@ def mllm_make_image_request(
             extra_body=extra_body,
             extra_headers={"X-TT-LOGID": logid},
         )
+        # 4.1 解析响应
         result = json.loads(response.model_dump_json())
-        message = result["choices"][0].get("message", {})
-        content = message.get("content", "")
+        assistant_message = result["choices"][0].get("message", {})
+        content = assistant_message.get("content", "")
 
         if is_json_response:
+            # 是否需要解析成json格式
             content = _process_json_response(content, model_name)
-
-        return content
+        # 5. 返回回复 + 新历史
+        new_history = messages + [{"role": "assistant", "content": content}]
+        return content, new_history
     except Exception as e:
-        raise e
+        raise Exception(f"`{model_name}` request error: {e}")
 
 
 def gemini_image_generate(
@@ -258,9 +261,28 @@ def gemini_image_generate(
 
 if __name__ == "__main__":
     # 调用多模态gemini-3.1-pro大模型的一个示例
-    result_prompt = mllm_make_image_request(
-        "翻译一下图中的文字",
+    # 第一轮对话
+    result_prompt, history_1  = mllm_make_image_dialogue_request(
+        "图中的商品是什么？",
         image_urls=["https://p16-oec-sg.ibyteimg.com/tos-alisg-i-aphluv4xwc-sg/8fa9fe853ef549e9bb0c308900aedab8~tplv-aphluv4xwc-origin-jpeg.jpeg?dr=15568&nonce=35024&refresh_token=7315fdc338070c10d871d06a11c4b700&from=1010592719&idc=my&ps=933b5bde&shcp=9b759fb9&shp=3c3c6bcf&t=555f072d"],
+        thinking_budget=1024,
+        max_tokens=5000,
+        timeout=60,
+        temperature=1.0,
+        is_json_response=False,
+        model_name="gemini-3.1-p",
+        api_key="pvs0e2G0HEQTQlzj89MxL5764bNwleyW_GPT_AK",
+        base_url="https://aidp-i18ntt-sg.tiktok-row.net/api/modelhub/online/v2/crawl",
+    )
+    print(result_prompt)
+
+    # 第二轮对话
+    result_prompt, history_2 = mllm_make_image_dialogue_request(
+        "它是什么颜色的？",
+        image_urls=[
+            "https://p16-oec-sg.ibyteimg.com/tos-alisg-i-aphluv4xwc-sg/8fa9fe853ef549e9bb0c308900aedab8~tplv-aphluv4xwc-origin-jpeg.jpeg?dr=15568&nonce=35024&refresh_token=7315fdc338070c10d871d06a11c4b700&from=1010592719&idc=my&ps=933b5bde&shcp=9b759fb9&shp=3c3c6bcf&t=555f072d"
+        ],
+        history_messages=history_1,
         thinking_budget=1024,
         max_tokens=5000,
         timeout=60,
