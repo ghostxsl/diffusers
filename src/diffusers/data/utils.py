@@ -11,14 +11,17 @@ import pandas
 import matplotlib
 import numpy as np
 
+
 __all__ = [
     't2i_collate_fn', 'controlnet_collate_fn', 'animate_collate_fn',
     'i2i_collate_fn', 'kolors_collate_fn', 'flux_collate_fn',
     'flux_fill_collate_fn', 'flux_kontext_collate_fn',
-    'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file', 'csv_save',
+    'pkl_save', 'pkl_load', 'json_save', 'json_load', 'load_file',
+    'csv_save', 'xlsx_save', 'load_csv_or_xlsx_to_dict',
     'draw_bodypose', 'draw_handpose', 'draw_facepose',
     'get_file_md5', 'get_str_md5', 'crop_human_bbox',
     'compute_OKS',
+    'get_bbox_from_mask',
 ]
 
 
@@ -306,6 +309,11 @@ def flux_kontext_collate_fn(examples):
     else:
         prompt_embeds = torch.zeros([0])
 
+    if 'prompt_embeds_mask' in examples[0]:
+        prompt_embeds_mask = torch.cat([example["prompt_embeds_mask"] for example in examples])
+    else:
+        prompt_embeds_mask = torch.zeros([0])
+
     if 'latent_image_ids' in examples[0]:
         latent_image_ids = torch.cat([example["latent_image_ids"] for example in examples])
         latent_image_ids = latent_image_ids.to(memory_format=torch.contiguous_format)
@@ -325,6 +333,7 @@ def flux_kontext_collate_fn(examples):
         "prompt_embeds": prompt_embeds,
         "latent_image_ids": latent_image_ids,
         "cond_image_ids": cond_image_ids,
+        "prompt_embeds_mask": prompt_embeds_mask,
     }
 
 
@@ -363,9 +372,27 @@ def load_file(file_path):
         return pkl_load(file_path)
 
 
-def csv_save(obj, file):
+def csv_save(obj, file, mode="w"):
     df = pandas.DataFrame(obj)
-    df.to_csv(file, mode='a', index=False, header=not exists(file))
+    header = True
+    if mode == "a":
+        header = not exists(file)
+    df.to_csv(file, mode=mode, index=False, header=header, encoding='utf-8')
+
+
+def xlsx_save(obj, file):
+    df = pandas.DataFrame(obj)
+    df.to_excel(file, index=False)
+
+
+def load_csv_or_xlsx_to_dict(file_path):
+    if file_path.endswith('.xlsx'):
+        df = pandas.read_excel(file_path)
+    elif file_path.endswith('.csv'):
+        df = pandas.read_csv(file_path, encoding='utf-8')
+    else:
+        raise Exception(f"Error `file_path` type:{file_path}")
+    return df.to_dict('records')
 
 
 def draw_bodypose(canvas, kpts, kpt_valid, stickwidth=4,
@@ -606,3 +633,15 @@ def compute_OKS(gt_kpts, gt_bboxes, dt_kpts, kpt_thr=0.3, perfect_match=True):
             ious[i, not_same_dts_ind] -= 1.
 
     return ious
+
+
+def get_bbox_from_mask(mask):
+    assert isinstance(mask, np.ndarray) and mask.ndim == 2
+
+    x = np.where(np.sum(mask, axis=0))[0]
+    y = np.where(np.sum(mask, axis=1))[0]
+    if len(x) > 1 and len(y) > 1:
+        x1, y1, x2, y2 = int(x[0]), int(y[0]), int(x[-1]) + 1, int(y[-1]) + 1
+        return [x1, y1, x2, y2]
+    else:
+        return None

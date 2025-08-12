@@ -45,6 +45,7 @@ __all__ = [
     'FLUXICImageDataset', 'FluxFillDataset', 'FluxAnyPTDataset',
     'FluxFillICT2IDataset', 'FluxTextPTDataset',
     'WanFLF2VDataset', 'FluxKontextDataset',
+    'QwenImageDataset',
 ]
 
 
@@ -2714,5 +2715,77 @@ class FluxKontextDataset(torch.utils.data.Dataset):
         example["cond_image_latents"] = latents["cond_image_latents"][0]
         example["latent_image_ids"] = latents["latent_image_ids"]
         example["cond_image_ids"] = latents["cond_image_ids"]
+
+        return example
+
+
+class QwenImageDataset(torch.utils.data.Dataset):
+    def __init__(
+            self,
+            dataset_file,
+            use_vae_latents=True,
+            image_size=(1664, 928),
+            cond_size=(672, 672),
+    ):
+        self.use_vae_latents = use_vae_latents
+        self.metadata = self.get_metadata(dataset_file)
+        self._length = len(self.metadata)
+
+        self.cond_max_area = cond_size[0] * cond_size[1]
+        self.resize = Resize(image_size, interpolation=tv_transforms.InterpolationMode.LANCZOS)
+        self.normalize_ = tv_transforms.Compose([
+            ToTensor(),
+            Normalize([0.5], [0.5], inplace=True),
+        ])
+
+    def __len__(self):
+        return self._length
+
+    def get_metadata(self, dataset_file):
+        print("Loading dataset...")
+        dataset_file = [a.strip() for a in dataset_file.split(',') if len(a.strip()) > 0]
+
+        data_list = []
+        for file_ in dataset_file:
+            temp_list = load_file(file_)
+            if isinstance(temp_list, list):
+                data_list += temp_list
+            else:
+                raise Exception(f"Error dataset_file: ({type(temp_list)}){file_}")
+
+        return data_list
+
+    def calculate_dimensions(self, ratio_wh, mod_value=16):
+        width = round(np.sqrt(self.cond_max_area * ratio_wh))
+        height = round(np.sqrt(self.cond_max_area / ratio_wh))
+
+        width = int(width // mod_value * mod_value)
+        height = int(height // mod_value * mod_value)
+
+        return (width, height)
+
+    def resize_cond_image(self, cond_image):
+        w, h = cond_image.size
+        new_size = self.calculate_dimensions(w / h)
+        return cond_image.resize(new_size, 1)
+
+    def __getitem__(self, index):
+        example = {}
+        item = self.metadata[index]
+
+        text_embedding = torch.load(item['text_embedding'], weights_only=True)
+        example["prompt_embeds"] = text_embedding["prompt_embeds"]
+        example["prompt_embeds_mask"] = text_embedding["prompt_embeds_mask"]
+
+        if self.use_vae_latents:
+            latents = torch.load(item['latents'], weights_only=True)
+            example["image_latents"] = latents["image_latents"][0]
+            example["cond_image_latents"] = latents["cond_image_latents"][0]
+        else:
+            cond_image = load_image(item['product_image'])
+            cond_image = self.resize_cond_image(cond_image)
+            example["cond_image_latents"] = self.normalize_(cond_image)
+            image = load_image(item['poster_image'])
+            example["image_latents"] = self.normalize_(image)
 
         return example
