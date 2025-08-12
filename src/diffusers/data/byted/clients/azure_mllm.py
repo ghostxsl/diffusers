@@ -7,7 +7,7 @@ import re
 from retrying import retry
 import logging
 
-import diffusers.data.errno as err
+import diffusers.data.byted.errno as err
 
 
 class MLLMClient:

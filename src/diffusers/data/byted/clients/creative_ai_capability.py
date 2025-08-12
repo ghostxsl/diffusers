@@ -1,13 +1,13 @@
 import json
 import logging
 import os
-os.environ["CONSUL_HTTP_HOST"] = "10.105.215.100"
-os.environ["SEC_KV_AUTH"] = "1"
-os.environ["TCE_PSM"] = "ad.creative.image_core_solution"
+# os.environ["CONSUL_HTTP_HOST"] = "10.105.215.100"
+# os.environ["TCE_PSM"] = "ad.creative.image_core_solution"
 import time
 from typing import List, Optional, Dict, Tuple, Union
 
-import diffusers.data.errno as err
+import diffusers.data.byted.errno as err
+from diffusers.data.byted.middleware import set_token_middleware, client_logid, calc_runtime_middleware
 
 import euler
 import byteddps
@@ -55,41 +55,6 @@ from overpass_ad_creative_ai_capabilities.euler_gen.idl.i18n_ad.creative.creativ
     ImageInfo,
     AdvanceSetting,
 )
-
-
-def set_token_middleware(ctx, *args, **kwargs):
-    logging.info("in set_token_middleware")
-    if os.getenv("TCE_HOST_ENV", "notTCE") == "notTCE":
-        logging.info("not TCE ENV, set token middleware")
-        base = getattr(args[0], "Base", Base())
-        psm = os.environ.get("TCE_PSM")
-        token = byteddps.get_token()
-        if psm is None or token is None:
-            logging.error(f"psm or token is None, psm: {psm}, token: {token}")
-        else:
-            base.Caller = psm
-            base.Extra = {"gdpr-token": token}
-            setattr(args[0], "Base", base)
-    return ctx.next(*args, **kwargs)
-
-
-def client_logid(ctx, *args, **kwargs):
-    try:
-        return ctx.next(*args, **kwargs)
-    finally:
-        logid = ctx.persistent.get("logid")
-        method = ctx.local.get("method", "-")
-        logging.info(f"Call {method}..., logid: {logid}")
-
-
-def calc_runtime_middleware(ctx, *args, **kwargs):
-    start = time.time()
-    result = ctx.next(*args, **kwargs)
-    end = time.time()
-    logging.info(f"calc_runtime_middleware: {end - start}")
-    if end - start > 120:
-        logging.info(f"Request timed too long, cost{end - start} seconds.")
-    return result
 
 
 AiCapabilityCli = AdCreativeAi_CapabilitiesClient(idc="my", cluster="default", transport="ttheader", timeout=300)
