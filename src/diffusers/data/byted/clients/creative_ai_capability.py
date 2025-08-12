@@ -1,16 +1,16 @@
 import json
 import logging
 import os
-os.environ["CONSUL_HTTP_HOST"] = "10.105.215.100"
-os.environ["SEC_KV_AUTH"] = "1"
-os.environ["TCE_PSM"] = "ad.creative.image_core_solution"
-import time
+# os.environ["CONSUL_HTTP_HOST"] = "10.105.215.100"
+# os.environ["TCE_PSM"] = "ad.creative.image_core_solution"
+from retrying import retry
 from typing import List, Optional, Dict, Tuple, Union
 
-import diffusers.data.errno as err
+import diffusers.data.byted.errno as err
+from diffusers.data.byted.middleware import client_logid, calc_runtime_middleware
 
-import euler
 import byteddps
+from euler.base_compat_middleware import gdpr_auth_middleware
 from overpass_ad_creative_image_core_solution.euler_gen.idl.base.base_thrift import Base
 
 # Overpass写法
@@ -57,48 +57,13 @@ from overpass_ad_creative_ai_capabilities.euler_gen.idl.i18n_ad.creative.creativ
 )
 
 
-def set_token_middleware(ctx, *args, **kwargs):
-    logging.info("in set_token_middleware")
-    if os.getenv("TCE_HOST_ENV", "notTCE") == "notTCE":
-        logging.info("not TCE ENV, set token middleware")
-        base = getattr(args[0], "Base", Base())
-        psm = os.environ.get("TCE_PSM")
-        token = byteddps.get_token()
-        if psm is None or token is None:
-            logging.error(f"psm or token is None, psm: {psm}, token: {token}")
-        else:
-            base.Caller = psm
-            base.Extra = {"gdpr-token": token}
-            setattr(args[0], "Base", base)
-    return ctx.next(*args, **kwargs)
-
-
-def client_logid(ctx, *args, **kwargs):
-    try:
-        return ctx.next(*args, **kwargs)
-    finally:
-        logid = ctx.persistent.get("logid")
-        method = ctx.local.get("method", "-")
-        logging.info(f"Call {method}..., logid: {logid}")
-
-
-def calc_runtime_middleware(ctx, *args, **kwargs):
-    start = time.time()
-    result = ctx.next(*args, **kwargs)
-    end = time.time()
-    logging.info(f"calc_runtime_middleware: {end - start}")
-    if end - start > 120:
-        logging.info(f"Request timed too long, cost{end - start} seconds.")
-    return result
-
-
 AiCapabilityCli = AdCreativeAi_CapabilitiesClient(idc="my", cluster="default", transport="ttheader", timeout=300)
-AiCapabilityCli.set_euler_client_middleware(set_token_middleware)
+AiCapabilityCli.set_euler_client_middleware(gdpr_auth_middleware)
 AiCapabilityCli.set_euler_client_middleware(client_logid)
 AiCapabilityCli.set_euler_client_middleware(calc_runtime_middleware)
-AiCapabilityCli.set_euler_client_middleware(euler.base_compat_middleware.gdpr_auth_middleware)
 
 
+@retry(stop_max_attempt_number=2, wait_fixed=300)
 def image_subject_seg(
     image_urls: Optional[List[str]],
     image_infos: List[ImageInfo] = None,
@@ -199,11 +164,12 @@ def image_body_face_detect(urls: List[str], only_judge_people: bool = True, max_
     return face_body_detect_res
 
 
-def image_body_face_detect_raw(urls: List[str], only_judge_people: bool = True, max_obj_num: int = 2) -> ImageBodyFaceDetectResponse:
+def image_body_face_detect_raw(urls: List[str], only_judge_people: bool = True, max_obj_num: int = 2, judge_people_thresold: float = 0.8) -> ImageBodyFaceDetectResponse:
     req = ImageBodyFaceDetectRequest(
         image_urls=urls,
         only_judge_people=only_judge_people,
         max_obj_num=max_obj_num,
+        judge_people_thresold=judge_people_thresold
     )
     logging.info(f"[image_body_face_detect_raw] req: {req}")
     code, msg, resp = AiCapabilityCli.ImageBodyFaceDetect(req_object=req)

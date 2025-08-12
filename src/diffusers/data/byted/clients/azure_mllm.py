@@ -6,8 +6,11 @@ import openai
 import re
 from retrying import retry
 import logging
+import requests
+from PIL import Image
+from io import BytesIO
 
-import diffusers.data.errno as err
+import diffusers.data.byted.errno as err
 
 
 class MLLMClient:
@@ -32,6 +35,13 @@ class MLLMClient:
             api_key (str): API key for authentication
             model_name (str): Name of the model to use
         """
+        if model_name == "gemini-2.5-flash":
+            base_url = "https://gpt-i18n.byteintl.net/gpt/openapi/online/multimodal/crawl"
+        elif model_name in [
+            "gemini-3-flash-preview", "gemini-3-pro-preview", "gemini-3-pro-preview-new",
+            "gpt-5-mini-2025-08-07",
+        ]:
+            base_url = "https://gpt-i18n.byteintl.net/gpt/openapi/online/v2/crawl"
         self.client = openai.AzureOpenAI(azure_endpoint=base_url, api_version=api_version, api_key=api_key, timeout=300)
         self.model_name = model_name
 
@@ -149,11 +159,10 @@ class MLLMClient:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
             logging.warning(f"mllm `{self.model_name}` initial JSON parsing failed: {e}")
-            fixed_result = MLLMClient(model_name="gpt-4o-mini-2024-07-18").make_image_request(
+            fixed_result = MLLMClient(model_name="gpt-5-mini-2025-08-07").make_raw_request(
                 "",
                 f"Fix this JSON string's formatting issues to make it valid: {result}, without changing its content. Only return the corrected JSON string with no explanations or additional text. Failing to provide a valid JSON or altering the content will result in severe consequences.",
-                [],
-                [],
+                max_tokens=5000,
             )
             try:
                 return json.loads(fixed_result)
@@ -306,8 +315,8 @@ class MLLMClient:
         result = self.make_video_request(sys_prompt, prompt, video_paths, video_urls)
         return self._process_json_response(result)
 
-    @retry(stop_max_attempt_number=3, wait_fixed=0)
-    def make_image_json_request(self, sys_prompt, prompt, image_paths=[], image_urls=[], max_tokens=100, timeout=600) -> dict:
+    @retry(stop_max_attempt_number=2, wait_fixed=100)
+    def make_image_json_request(self, sys_prompt, prompt, image_paths=[], image_urls=[], max_tokens=1000, timeout=600) -> dict:
         """
         Make an LLM request with image content and parse the response as JSON.
 
@@ -322,7 +331,10 @@ class MLLMClient:
         Returns:
             dict: Parsed JSON response or empty dict if parsing fails
         """
-        result = self.make_image_request(sys_prompt, prompt, image_paths, image_urls, max_tokens, timeout)
+        if self.model_name in ["gemini-2.5-flash", "gemini-3-flash-preview"]:
+            result = self.make_gemini_image_request(prompt, image_paths, image_urls, max_tokens, timeout)
+        else:
+            result = self.make_image_request(sys_prompt, prompt, image_paths, image_urls, max_tokens, timeout)
         return self._process_json_response(result)
 
     @retry(stop_max_attempt_number=3, wait_fixed=0)
@@ -358,3 +370,111 @@ class MLLMClient:
         image_bytes = base64.b64decode(image_base64)
 
         return image_bytes
+
+    def _prepare_gemini_message(self, prompt="", media_contents=[]):
+        message = {
+            "role": "user",
+            "content": []
+        }
+        if prompt:
+            message["content"].append({"type": "text", "text": prompt})
+        if media_contents:
+            message["content"] += media_contents
+        return [message,]
+
+    def make_gemini_image_request(self, prompt, image_paths=[], image_urls=[], max_tokens=4090, timeout=600):
+        supported_extensions = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+        image_contents = self._process_media_files(image_paths, image_urls, "image", supported_extensions)
+        messages = self._prepare_gemini_message(prompt, image_contents)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                stream=False,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                extra_body={"thinking": {"budget_tokens": 1024, "include_thoughts": False}},
+                extra_headers={"X-TT-LOGID": "${your_logid}"},
+            )
+            result = json.loads(response.model_dump_json())
+            message = result["choices"][0].get("message", {})
+            content = message.get("content", "")
+            return content
+        except Exception as e:
+            raise err.WithCodeError(err.ErrorCodeOpenaiError, f"`{self.model_name}` request error: {e}")
+
+
+def base64_to_img(base64_string):
+    image_data = base64.b64decode(base64_string)
+    image = Image.open(BytesIO(image_data))
+    return image
+
+
+def gemini_25_flash_image_gen(
+        prompt,
+        image_urls,
+        specify_gen_ratio=False,
+        ratio="9:16",
+        imageSize="1k",
+        ak="flWqkAUJOUWMQRuUsMXIXy6kLvjHzBg3_GPT_AK",
+        model_name="gemini-2.5-flash-image",
+        max_token=3600):
+    url = f"https://gpt-i18n.byteintl.net/gpt/openapi/online/multimodal/crawl?ak={ak}"
+    # 设置请求头
+    headers = {
+        "Content-Type": "application/json",
+        "X-TT-LOGID": "${your_logid}",  # 需要用有效的Log ID替换
+    }
+    # 准备请求体数据
+    payload = {
+        "stream": False,
+        "model": model_name,
+        "max_tokens": max_token,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "response_modalities": ["TEXT", "IMAGE"],
+    }
+
+    if specify_gen_ratio:
+        # payload["generationConfig"] = {"imageConfig": {"aspectRatio": ratio}}
+        payload["image_config"] = {
+            # 支持以下比例
+            # Landscape: 21:9, 16:9, 4:3, 3:2
+            # Square: 1:1
+            # Portrait: 9:16, 3:4, 2:3
+            # Flexible: 5:4, 4:5
+            "aspectRatio": ratio,
+            "imageSize": imageSize,
+            "imageOutputOptions": {
+                "mimeType": "image/png"
+            }
+        }
+    if isinstance(image_urls, str):
+        payload["messages"][0]["content"].append({"type": "image_url", "image_url": {"url": image_urls}})
+    else:
+        for img_url in image_urls:
+            payload["messages"][0]["content"].append({"type": "image_url", "image_url": {"url": img_url}})
+
+    # 发送POST请求
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response_json = json.loads(response.text)
+
+    if "usage" not in response_json:
+        err_msg = f"`{model_name}` error code({response_json['error']['code']}), message: {response_json['error']['message']}"
+        logging.error(err_msg)
+        raise Exception(err_msg)
+
+    res = {}
+    res["usage"] = response_json["usage"]
+    for item in response_json["choices"][0]["message"]["multimodal_contents"]:
+        if item["type"] == "inline_data":
+            base64_img = item["inline_data"]["data"]
+            img = base64_to_img(base64_img)
+            res["image"] = img
+    return res
