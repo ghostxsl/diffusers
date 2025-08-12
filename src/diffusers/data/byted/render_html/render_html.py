@@ -2,8 +2,8 @@ import json
 import time
 from typing import Tuple
 
-from diffusers.data.render_html.url2carousel_template import template as url2carouselTemplate
-from diffusers.data.tos import save_tos
+from diffusers.data.byted.render_html.url2carousel_template import template as url2carouselTemplate
+from diffusers.data.byted.tos import save_tos
 
 
 ErrCodeTosError = 51301
